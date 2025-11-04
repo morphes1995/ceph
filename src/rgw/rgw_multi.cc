@@ -237,6 +237,7 @@ int abort_multipart_upload(const DoutPrefixProvider *dpp,
         string oid = mp_obj.get_part(obj_iter->second.num);
         obj.init_ns(bucket_info.bucket, oid, RGW_OBJ_NS_MULTIPART);
         obj.index_hash_source = mp_obj.get_key();
+        // tmp part obj deletion should bypass trash bin
         ret = store->getRados()->delete_obj(dpp, *obj_ctx, bucket_info, obj, 0);
         if (ret < 0 && ret != -ENOENT)
           return ret;
@@ -278,6 +279,10 @@ int abort_multipart_upload(const DoutPrefixProvider *dpp,
   
   del_op.params.abortmp = true;
   del_op.params.parts_accounted_size = parts_accounted_size;
+
+  del_op.params.bucket_trash_bin_enabled = bucket_info.trash_bin_enabled();
+  del_op.params.obj_in_bucket_trash_bin = store->get_object(del_target.get_obj().key)->obj_in_bucket_trash_bin();
+  del_op.params.del_obj_bypass_trash_bin = true;  // upload metadata object deletion should bypass trash bin
 
   // and also remove the metadata obj
   ret = del_op.delete_obj(null_yield, dpp);

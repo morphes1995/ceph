@@ -32,7 +32,7 @@ public:
   }
   virtual RGWCoroutine *sync_object(RGWDataSyncCtx *sc, rgw_bucket_sync_pipe& sync_pipe, rgw_obj_key& key, std::optional<uint64_t> versioned_epoch, rgw_zone_set *zones_trace) = 0;
   virtual RGWCoroutine *remove_object(RGWDataSyncCtx *sc, rgw_bucket_sync_pipe& bucket_info, rgw_obj_key& key, real_time& mtime,
-                                      bool versioned, uint64_t versioned_epoch, rgw_zone_set *zones_trace) = 0;
+                                      bool versioned, uint64_t versioned_epoch, rgw_zone_set *zones_trace, uint16_t bilog_flags = 0) = 0;
   virtual RGWCoroutine *create_delete_marker(RGWDataSyncCtx *sc, rgw_bucket_sync_pipe& bucket_info, rgw_obj_key& key, real_time& mtime,
                                              rgw_bucket_entry_owner& owner, bool versioned, uint64_t versioned_epoch, rgw_zone_set *zones_trace) = 0;
 };

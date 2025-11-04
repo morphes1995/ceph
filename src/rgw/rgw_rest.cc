@@ -1008,6 +1008,11 @@ int RGWPutObj_ObjStore::verify_params()
     }
   }
 
+  if (s->object->obj_in_bucket_trash_bin()){
+      ldpp_dout(this, 0) << "prefix "<< RGW_TRASH_RESERVATION_PREFIX << " used by system, we can't put object under this prefix !, object: "<<s->object->get_name() << dendl;
+      return -EACCES;
+  }
+
   return 0;
 }
 

@@ -366,6 +366,9 @@ void RGWOp_Object_Remove::execute(optional_yield y)
   RESTArgs::get_string(s, "bucket", bucket, &bucket);
   RESTArgs::get_string(s, "object", object, &object);
 
+  if (s->info.args.exists(RGW_TRASH_FORCE_DELETE)){
+      op_state.bypass_trash_bin = true;
+  }
   op_state.set_bucket_name(bucket);
   op_state.set_object(object);
 

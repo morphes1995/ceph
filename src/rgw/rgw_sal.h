@@ -188,6 +188,7 @@ class RGWBucket {
       rgw_obj_key end_marker;
       std::string ns;
       bool enforce_ns{true};
+      bool filter_trash{false};
       RGWAccessListFilter *filter{nullptr};
       bool list_versions{false};
       bool allow_unordered{false};
@@ -453,12 +454,15 @@ class RGWObject {
 
     virtual int read(off_t offset, off_t length, std::iostream& stream) = 0;
     virtual int write(off_t offset, off_t length, std::iostream& stream) = 0;
+
     virtual int delete_object(const DoutPrefixProvider *dpp, RGWObjectCtx* obj_ctx, ACLOwner obj_owner,
 			      ACLOwner bucket_owner, ceph::real_time unmod_since,
 			      bool high_precision_time, uint64_t epoch,
 			      std::string& version_id,
 			      optional_yield y,
-			      bool prevent_versioning = false) = 0;
+			      bool prevent_versioning = false,
+                  bool del_obj_bypass_trash_bin = false,
+                  bool restore_obj_from_trash_bin = false) = 0;
     virtual int copy_object(RGWObjectCtx& obj_ctx, RGWUser* user,
                req_info *info, const rgw_zone_id& source_zone,
                rgw::sal::RGWObject* dest_object, rgw::sal::RGWBucket* dest_bucket,
@@ -528,6 +532,14 @@ class RGWObject {
       obj.set_in_extra_data(in_extra_data);
       obj.index_hash_source = index_hash_source;
       return obj;
+    }
+
+    bool obj_in_bucket_trash_bin(void) {
+        std::string obj_path = get_name();
+        if (with_trash_reserved_prefix(obj_path)){
+            return true;
+        }
+        return false;
     }
 
     /* Swift versioning */

@@ -959,6 +959,10 @@ int RGWPubSub::SubWithEvents<EventType>::remove_event(const DoutPrefixProvider *
   del_op.params.bucket_owner = bucket_info.owner;
   del_op.params.versioning_status = bucket_info.versioning_status();
 
+  del_op.params.bucket_trash_bin_enabled = bucket_info.trash_bin_enabled();
+  del_op.params.obj_in_bucket_trash_bin = store->get_object(del_target.get_obj().key)->obj_in_bucket_trash_bin();
+  del_op.params.del_obj_bypass_trash_bin = true;  // event object deletion should bypass trash bin
+
   ret = del_op.delete_obj(null_yield, dpp);
   if (ret < 0) {
     ldpp_dout(dpp, 1) << "ERROR: failed to remove event (obj=" << obj << "): ret=" << ret << dendl;
