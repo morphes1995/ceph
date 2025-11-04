@@ -330,7 +330,7 @@ bool rgw_bucket_object_check_filter(const string& oid)
   return rgw_obj_key::oid_to_key_in_ns(oid, &key, ns);
 }
 
-int rgw_remove_object(const DoutPrefixProvider *dpp, rgw::sal::RGWRadosStore *store, const RGWBucketInfo& bucket_info, const rgw_bucket& bucket, rgw_obj_key& key)
+int rgw_remove_object(const DoutPrefixProvider *dpp, rgw::sal::RGWRadosStore *store, const RGWBucketInfo& bucket_info, const rgw_bucket& bucket, rgw_obj_key& key, bool del_obj_bypass_trash_bin)
 {
   RGWObjectCtx rctx(store);
 
@@ -339,8 +339,8 @@ int rgw_remove_object(const DoutPrefixProvider *dpp, rgw::sal::RGWRadosStore *st
   }
 
   rgw_obj obj(bucket, key);
-
-  return store->getRados()->delete_obj(dpp, rctx, bucket_info, obj, bucket_info.versioning_status());
+  return store->getRados()->delete_obj(dpp, rctx, bucket_info, obj, bucket_info.versioning_status(),
+                                       0, ceph::real_time(), nullptr, del_obj_bypass_trash_bin);
 }
 
 static int aio_wait(librados::AioCompletion *handle)
@@ -779,6 +779,7 @@ int RGWBucket::set_quota(RGWBucketAdminOpState& op_state, const DoutPrefixProvid
   return r;
 }
 
+// done
 int RGWBucket::remove_object(const DoutPrefixProvider *dpp, RGWBucketAdminOpState& op_state, std::string *err_msg)
 {
   rgw_bucket bucket = op_state.get_bucket();
@@ -786,7 +787,7 @@ int RGWBucket::remove_object(const DoutPrefixProvider *dpp, RGWBucketAdminOpStat
 
   rgw_obj_key key(object_name);
 
-  int ret = rgw_remove_object(dpp, store, bucket_info, bucket, key);
+  int ret = rgw_remove_object(dpp, store, bucket_info, bucket, key, op_state.bypass_trash_bin);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to remove object" + cpp_strerror(-ret));
     return ret;
@@ -1069,6 +1070,31 @@ int RGWBucket::sync(RGWBucketAdminOpState& op_state, map<string, bufferlist> *at
   return 0;
 }
 
+int RGWBucket::set_trash(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg) {
+    rgw_bucket bucket = op_state.get_bucket();
+    RGWBucketInfo bucket_info;
+    map<string, bufferlist> attrs;
+    int r = store->getRados()->get_bucket_info(store->svc(), bucket.tenant, bucket.name, bucket_info, NULL, null_yield,
+                                               dpp, &attrs);
+    if (r < 0) {
+        set_err_msg(err_msg, "could not get bucket info for bucket=" + bucket.name + ": " + cpp_strerror(-r));
+        return r;
+    }
+
+    if (op_state.trash_enabled) {
+        bucket_info.flags = bucket_info.flags | BUCKET_TRASH_ENABLED;
+    } else {
+        bucket_info.flags = bucket_info.flags & (~BUCKET_TRASH_ENABLED) ;
+    }
+
+    r = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &attrs, dpp);
+    if (r < 0) {
+        set_err_msg(err_msg, "ERROR: failed writing bucket instance info: " + cpp_strerror(-r));
+        return r;
+    }
+    return r;
+}
+
 
 int RGWBucket::policy_bl_to_stream(bufferlist& bl, ostream& o)
 {
@@ -1310,6 +1336,16 @@ int RGWBucketAdminOp::sync_bucket(rgw::sal::RGWRadosStore *store, RGWBucketAdmin
   return bucket.sync(op_state, &attrs, dpp, err_msg);
 }
 
+int RGWBucketAdminOp::set_trash(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg)
+{
+    RGWBucket bucket;
+
+    int ret = bucket.init(store, op_state, null_yield, dpp);
+    if (ret < 0)
+        return ret;
+    return bucket.set_trash(op_state, dpp, err_msg);
+}
+
 static int bucket_stats(rgw::sal::RGWRadosStore *store,
 			const std::string& tenant_name,
 			const std::string& bucket_name,
@@ -1362,6 +1398,7 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   formatter->dump_string("max_marker", max_marker);
   dump_bucket_usage(stats, formatter);
   encode_json("bucket_quota", bucket_info.quota, formatter);
+  formatter->dump_bool("trash enabled", bucket_info.trash_bin_enabled());
 
   // bucket tags
   auto iter = attrs.find(RGW_ATTR_TAGS);
@@ -1982,7 +2019,8 @@ static int fix_bucket_obj_expiry(const DoutPrefixProvider *dpp,
 	formatter->dump_stream("delete_at") << delete_at;
 
 	if (!dry_run) {
-	  ret = rgw_remove_object(dpp, store, bucket_info, bucket_info.bucket, key);
+      // expired object deletion should bypass trash bin
+      ret = rgw_remove_object(dpp, store, bucket_info, bucket_info.bucket, key, true);
 	  formatter->dump_int("status", ret);
 	}
 

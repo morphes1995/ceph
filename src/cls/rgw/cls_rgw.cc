@@ -877,7 +877,6 @@ int rgw_bucket_prepare_op(cls_method_context_t hctx, bufferlist *in, bufferlist 
     return rc;
 
   bool noent = (rc == -ENOENT);
-
   rc = 0;
 
   if (noent) { // no entry, initialize fields
@@ -1129,7 +1128,9 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   } // CLS_RGW_OP_CANCEL
   else if (op.op == CLS_RGW_OP_DEL) {
     // unaccount deleted entry
-    unaccount_entry(header, entry);
+    if (op.update_quota_stats){
+        unaccount_entry(header, entry);
+    }
 
     entry.meta = op.meta;
     if (!ondisk) {
@@ -1152,19 +1153,23 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   } // CLS_RGW_OP_DEL
   else if (op.op == CLS_RGW_OP_ADD) {
     // unaccount overwritten entry
-    unaccount_entry(header, entry);
+    if (op.update_quota_stats){
+        unaccount_entry(header, entry);
+    }
 
     rgw_bucket_dir_entry_meta& meta = op.meta;
-    rgw_bucket_category_stats& stats = header.stats[meta.category];
     entry.meta = meta;
     entry.key = op.key;
     entry.exists = true;
     entry.tag = op.tag;
-    // account for new entry
-    stats.num_entries++;
-    stats.total_size += meta.accounted_size;
-    stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
-    stats.actual_size += meta.size;
+    if (op.update_quota_stats){
+        rgw_bucket_category_stats& stats = header.stats[meta.category];
+        // account for new entry
+        stats.num_entries++;
+        stats.total_size += meta.accounted_size;
+        stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
+        stats.actual_size += meta.size;
+    }
     bufferlist new_key_bl;
     encode(entry, new_key_bl);
     rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
@@ -2585,6 +2590,28 @@ static int rgw_bi_put_op(cls_method_context_t hctx, bufferlist *in, bufferlist *
   }
 
   return 0;
+}
+
+static int rgw_bi_ent_remove_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+    CLS_LOG(10, "entered %s()\n", __func__);
+    // decode request
+    rgw_cls_bi_put_op op; // we reuse put op
+    auto iter = in->cbegin();
+    try {
+        decode(op, iter);
+    } catch (ceph::buffer::error& err) {
+        CLS_LOG(0, "ERROR: %s: failed to decode request", __func__);
+        return -EINVAL;
+    }
+
+    rgw_cls_bi_entry& entry = op.entry;
+    int r = cls_cxx_map_remove_key(hctx, entry.idx);
+    if (r < 0) {
+        CLS_LOG(0, "ERROR: %s: cls_cxx_map_remove_key() returned r=%d", __func__, r);
+    }
+
+    return 0;
 }
 
 
@@ -4403,6 +4430,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_obj_check_mtime;
   cls_method_handle_t h_rgw_bi_get_op;
   cls_method_handle_t h_rgw_bi_put_op;
+  cls_method_handle_t h_rgw_bi_ent_remove_op;
   cls_method_handle_t h_rgw_bi_list_op;
   cls_method_handle_t h_rgw_bi_log_list_op;
   cls_method_handle_t h_rgw_bi_log_resync_op;
@@ -4455,6 +4483,7 @@ CLS_INIT(rgw)
 
   cls_register_cxx_method(h_class, RGW_BI_GET, CLS_METHOD_RD, rgw_bi_get_op, &h_rgw_bi_get_op);
   cls_register_cxx_method(h_class, RGW_BI_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_put_op, &h_rgw_bi_put_op);
+  cls_register_cxx_method(h_class, RGW_BI_ENT_RM, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_ent_remove_op, &h_rgw_bi_ent_remove_op);
   cls_register_cxx_method(h_class, RGW_BI_LIST, CLS_METHOD_RD, rgw_bi_list_op, &h_rgw_bi_list_op);
 
   cls_register_cxx_method(h_class, RGW_BI_LOG_LIST, CLS_METHOD_RD, rgw_bi_log_list, &h_rgw_bi_log_list_op);

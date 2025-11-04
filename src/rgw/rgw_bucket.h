@@ -237,7 +237,7 @@ extern int rgw_read_user_buckets(const DoutPrefixProvider *dpp,
                                  bool need_stats,
 				 optional_yield y);
 
-extern int rgw_remove_object(const DoutPrefixProvider *dpp, rgw::sal::RGWRadosStore *store, const RGWBucketInfo& bucket_info, const rgw_bucket& bucket, rgw_obj_key& key);
+extern int rgw_remove_object(const DoutPrefixProvider *dpp, rgw::sal::RGWRadosStore *store, const RGWBucketInfo& bucket_info, const rgw_bucket& bucket, rgw_obj_key& key, bool del_obj_bypass_trash_bin);
 extern int rgw_remove_bucket_bypass_gc(rgw::sal::RGWRadosStore *store, rgw_bucket& bucket, int concurrent_max, optional_yield y);
 
 extern int rgw_object_get_attr(rgw::sal::RGWRadosStore* store, const RGWBucketInfo& bucket_info,
@@ -261,6 +261,8 @@ struct RGWBucketAdminOpState {
   bool delete_child_objects;
   bool bucket_stored;
   bool sync_bucket;
+  bool trash_enabled;
+  bool bypass_trash_bin;
   int max_aio = 0;
 
   rgw_bucket bucket;
@@ -296,6 +298,7 @@ struct RGWBucketAdminOpState {
 
 
   void set_sync_bucket(bool value) { sync_bucket = value; }
+  void set_trash_enabled(bool value) { trash_enabled = value; }
 
   rgw_user& get_user_id() { return uid; }
   std::string& get_user_display_name() { return display_name; }
@@ -326,7 +329,7 @@ struct RGWBucketAdminOpState {
 
   RGWBucketAdminOpState() : list_buckets(false), stat_buckets(false), check_objects(false), 
                             fix_index(false), delete_child_objects(false),
-                            bucket_stored(false), sync_bucket(true)  {}
+                            bucket_stored(false), sync_bucket(true), bypass_trash_bin(false)  {}
 };
 
 /*
@@ -379,6 +382,7 @@ public:
   int policy_bl_to_stream(bufferlist& bl, ostream& o);
   int get_policy(RGWBucketAdminOpState& op_state, RGWAccessControlPolicy& policy, optional_yield y, const DoutPrefixProvider *dpp);
   int sync(RGWBucketAdminOpState& op_state, map<string, bufferlist> *attrs, const DoutPrefixProvider *dpp, std::string *err_msg = NULL);
+  int set_trash(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg);
 
   void clear_failure() { failure = false; }
 
@@ -424,6 +428,7 @@ public:
 			    RGWFormatterFlusher& flusher, const DoutPrefixProvider *dpp, bool dry_run = false);
 
   static int sync_bucket(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg = NULL);
+  static int set_trash(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg);
 };
 
 struct rgw_ep_info {

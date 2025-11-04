@@ -142,7 +142,6 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_CRYPT_CONTEXT  RGW_ATTR_CRYPT_PREFIX "context"
 #define RGW_ATTR_CRYPT_DATAKEY  RGW_ATTR_CRYPT_PREFIX "datakey"
 
-
 #define RGW_FORMAT_PLAIN        0
 #define RGW_FORMAT_XML          1
 #define RGW_FORMAT_JSON         2
@@ -172,6 +171,11 @@ using ceph::crypto::MD5;
 
 #define RGW_DEFER_TO_BUCKET_ACLS_RECURSE 1
 #define RGW_DEFER_TO_BUCKET_ACLS_FULL_CONTROL 2
+
+# define RGW_TRASH_RESERVATION_PREFIX ".trash/"
+# define RGW_TRASH_FORCE_DELETE "rgw_trash_force_delete"
+# define RGW_TRASH_OBJ_RESTORE "rgw_trash_obj_restore"
+# define RGW_TRASH_OBJ_ORIGIN_MTIME RGW_ATTR_PREFIX "origin_mtime"
 
 #define STATUS_CREATED           1900
 #define STATUS_ACCEPTED          1901
@@ -986,6 +990,7 @@ enum RGWBucketFlags {
   BUCKET_DATASYNC_DISABLED = 0X8,
   BUCKET_MFA_ENABLED = 0X10,
   BUCKET_OBJ_LOCK_ENABLED = 0X20,
+  BUCKET_TRASH_ENABLED = 0X40,
 };
 
 class RGWSI_Zone;
@@ -1044,6 +1049,7 @@ struct RGWBucketInfo {
   bool mfa_enabled() const { return (versioning_status() & BUCKET_MFA_ENABLED) != 0; }
   bool datasync_flag_enabled() const { return (flags & BUCKET_DATASYNC_DISABLED) == 0; }
   bool obj_lock_enabled() const { return (flags & BUCKET_OBJ_LOCK_ENABLED) != 0; }
+  bool trash_bin_enabled() const { return (flags & BUCKET_TRASH_ENABLED) != 0; }
 
   bool has_swift_versioning() const {
     /* A bucket may be versioned through one mechanism only. */

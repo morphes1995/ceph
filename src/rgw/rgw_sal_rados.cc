@@ -122,7 +122,8 @@ int RGWRadosBucket::remove_bucket(const DoutPrefixProvider *dpp,
     for (const auto& obj : results.objs) {
       rgw_obj_key key(obj.key);
       /* xxx dang */
-      ret = rgw_remove_object(dpp, store, info, info.bucket, key);
+      // when delete bucket , all objects deletion should bypass trash bin
+      ret = rgw_remove_object(dpp, store, info, info.bucket, key, true);
       if (ret < 0 && ret != -ENOENT) {
 	return ret;
       }
@@ -370,6 +371,7 @@ int RGWRadosBucket::list(const DoutPrefixProvider *dpp, ListParams& params, int 
   list_op.params.marker = params.marker;
   list_op.params.ns = params.ns;
   list_op.params.end_marker = params.end_marker;
+  list_op.params.filter_trash = params.filter_trash;
   list_op.params.list_versions = params.list_versions;
   list_op.params.allow_unordered = params.allow_unordered;
 
@@ -710,7 +712,9 @@ int RGWRadosObject::delete_object(const DoutPrefixProvider *dpp,
 				  uint64_t epoch,
 				  std::string& version_id,
 				  optional_yield y,
-				  bool prevent_versioning)
+				  bool prevent_versioning,
+                  bool del_obj_bypass_trash_bin,
+                  bool restore_obj_from_trash_bin)
 {
   int ret = 0;
   RGWRados::Object del_target(store->getRados(), bucket->get_info(), *obj_ctx, get_obj());
@@ -725,10 +729,17 @@ int RGWRadosObject::delete_object(const DoutPrefixProvider *dpp,
   del_op.params.unmod_since = unmod_since;
   del_op.params.high_precision_time = high_precision_time;
 
-  ret = del_op.delete_obj(y, dpp);
-  if (ret >= 0) {
-    delete_marker = del_op.result.delete_marker;
-    version_id = del_op.result.version_id;
+  del_op.params.bucket_trash_bin_enabled = bucket->get_info().trash_bin_enabled();
+  del_op.params.obj_in_bucket_trash_bin = obj_in_bucket_trash_bin();
+  del_op.params.del_obj_bypass_trash_bin = del_obj_bypass_trash_bin;
+  if (restore_obj_from_trash_bin){
+      ret = del_op.restore_obj(y, dpp);
+  }else{
+      ret = del_op.delete_obj(y, dpp);
+      if (ret >= 0) {
+          delete_marker = del_op.result.delete_marker;
+          version_id = del_op.result.version_id;
+      }
   }
 
   return ret;

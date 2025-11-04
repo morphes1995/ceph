@@ -1392,6 +1392,9 @@ protected:
   bool bypass_perm;
   bool bypass_governance_mode;
 
+  bool del_obj_bypass_trash_bin;
+  bool restore_obj_from_trash_bin;
+
 public:
   RGWDeleteObj()
     : delete_marker(false),
@@ -1399,8 +1402,9 @@ public:
       no_precondition_error(false),
       deleter(nullptr),
       bypass_perm(true),
-      bypass_governance_mode(false) {
-  }
+      bypass_governance_mode(false),
+      del_obj_bypass_trash_bin(false),
+      restore_obj_from_trash_bin(false){}
 
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
@@ -1914,7 +1918,8 @@ class RGWDeleteMultiObj : public RGWOp {
    */
   void handle_individual_object(const rgw_obj_key& o,
 				optional_yield y,
-                                boost::asio::deadline_timer *formatter_flush_cond);
+                                boost::asio::deadline_timer *formatter_flush_cond,
+                                bool del_obj_bypass_trash_bin, bool restore_obj_from_trash_bin);
   
   /**
    * When the request is being executed in a coroutine, performs
@@ -1941,12 +1946,17 @@ protected:
   bool bypass_perm;
   bool bypass_governance_mode;
 
+  bool del_obj_bypass_trash_bin;
+  bool restore_obj_from_trash_bin;
+
 public:
   RGWDeleteMultiObj() {
     quiet = false;
     status_dumped = false;
     bypass_perm = true;
     bypass_governance_mode = false;
+    del_obj_bypass_trash_bin = false;
+    restore_obj_from_trash_bin = false;
   }
 
   int verify_permission(optional_yield y) override;

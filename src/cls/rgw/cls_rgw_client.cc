@@ -286,7 +286,8 @@ void cls_rgw_bucket_complete_op(ObjectWriteOperation& o, RGWModifyOp op, string&
                                 rgw_bucket_dir_entry_meta& dir_meta,
 				list<cls_rgw_obj_key> *remove_objs, bool log_op,
                                 uint16_t bilog_flags,
-                                rgw_zone_set *zones_trace)
+                                rgw_zone_set *zones_trace,
+                                bool update_quota_stats)
 {
 
   bufferlist in;
@@ -303,6 +304,7 @@ void cls_rgw_bucket_complete_op(ObjectWriteOperation& o, RGWModifyOp op, string&
   if (zones_trace) {
     call.zones_trace = *zones_trace;
   }
+  call.update_quota_stats = update_quota_stats;
   encode(call, in);
   o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_OP, in);
 }
@@ -461,6 +463,19 @@ void cls_rgw_bi_put(ObjectWriteOperation& op, const string oid, rgw_cls_bi_entry
   call.entry = entry;
   encode(call, in);
   op.exec(RGW_CLASS, RGW_BI_PUT, in);
+}
+
+int cls_rgw_bi_ent_remove(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry)
+{
+    bufferlist in, out;
+    rgw_cls_bi_put_op call; // we reuse bi_put_op
+    call.entry = entry;
+    encode(call, in);
+    int r = io_ctx.exec(oid, RGW_CLASS, RGW_BI_ENT_RM, in, out);
+    if (r < 0)
+        return r;
+
+    return 0;
 }
 
 /* nb: any entries passed in are replaced with the results of the cls

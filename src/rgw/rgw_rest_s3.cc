@@ -3185,6 +3185,28 @@ int RGWDeleteObj_ObjStore_S3::get_params(optional_yield y)
     bypass_governance_mode = boost::algorithm::iequals(bypass_gov_decoded, "true");
   }
 
+  if (s->info.args.exists(RGW_TRASH_FORCE_DELETE)){
+      del_obj_bypass_trash_bin = true;
+  }
+  if (s->info.args.exists(RGW_TRASH_OBJ_RESTORE)){
+      if (!s->object->obj_in_bucket_trash_bin()){
+          ldpp_dout(this, 0) << "ERROR: obj (" << s->object->get_name() << ")  is not in trash bin, restore op is prohibited! " << dendl;
+          return -EINVAL;
+      }
+      restore_obj_from_trash_bin = true;
+  }
+
+  if (del_obj_bypass_trash_bin && restore_obj_from_trash_bin){
+      ldpp_dout(this, 0) << "ERROR: concurrence of restore from trash param and force delete param is invalid! " << dendl;
+      return -EINVAL;
+  }
+  if (del_obj_bypass_trash_bin || restore_obj_from_trash_bin){
+      if (!s->bucket->get_info().trash_bin_enabled()){
+          ldpp_dout(this, 0) << "ERROR: restore from trash/force delete param are invalid when bucket trash bin is disabled! " << dendl;
+          return -EINVAL;
+      }
+  }
+
   return 0;
 }
 
@@ -3888,6 +3910,25 @@ int RGWDeleteMultiObj_ObjStore_S3::get_params(optional_yield y)
   int ret = RGWDeleteMultiObj_ObjStore::get_params(y);
   if (ret < 0) {
     return ret;
+  }
+
+  if (s->info.args.exists(RGW_TRASH_FORCE_DELETE)){
+      del_obj_bypass_trash_bin = true;
+  }
+  if (s->info.args.exists(RGW_TRASH_OBJ_RESTORE)){
+      restore_obj_from_trash_bin = true;
+  }
+
+  if (del_obj_bypass_trash_bin && restore_obj_from_trash_bin){
+      ldpp_dout(this, 0) << "ERROR: concurrence of restore from trash param and force delete param is invalid! " << dendl;
+      return -EINVAL;
+  }
+
+  if (del_obj_bypass_trash_bin || restore_obj_from_trash_bin){
+      if (!s->bucket->get_info().trash_bin_enabled()){
+          ldpp_dout(this, 0) << "ERROR: restore from trash/force delete param are invalid when bucket trash bin is disabled! " << dendl;
+          return -EINVAL;
+      }
   }
 
   const char *bypass_gov_header = s->info.env->get("HTTP_X_AMZ_BYPASS_GOVERNANCE_RETENTION");

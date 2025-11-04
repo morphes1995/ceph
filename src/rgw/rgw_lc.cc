@@ -591,7 +591,7 @@ static int remove_expired_obj(const DoutPrefixProvider *dpp, lc_op_ctx& oc, bool
   bucket_owner.set_id(bucket_info.owner);
 
   return obj->delete_object(dpp, &oc.rctx, obj_owner, bucket_owner, meta.mtime, false, 0,
-			    version_id, null_yield);
+			    version_id, null_yield, false, true); // for object deleted by LC, bypass trash bin
 } /* remove_expired_obj */
 
 class LCOpAction {

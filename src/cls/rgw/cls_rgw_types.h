@@ -645,7 +645,7 @@ struct rgw_bi_log_entry {
   std::string instance;
   ceph::real_time timestamp;
   rgw_bucket_entry_ver ver;
-  RGWModifyOp op;
+  RGWModifyOp op; // todo bucket trash: compat with bucket sync
   RGWPendingState state;
   uint64_t index_ver;
   std::string tag;

@@ -2347,6 +2347,12 @@ void RGWGetObj::execute(optional_yield y)
     return;
   }
 
+  if (s->object->obj_in_bucket_trash_bin()){
+      // object in trash bin can only get it's metadata, download is prohibited
+      op_ret = -EPERM;
+      goto done_err;
+  }
+
   perfcounter->inc(l_rgw_get_b, end - ofs);
 
   ofs_x = ofs;
@@ -2978,6 +2984,7 @@ void RGWListBucket::execute(optional_yield y)
   params.delim = delimiter;
   params.marker = marker;
   params.end_marker = end_marker;
+  params.filter_trash = true;
   params.list_versions = list_versions;
   params.allow_unordered = allow_unordered;
   params.shard_id = shard_id;
@@ -5031,6 +5038,15 @@ void RGWDeleteObj::execute(optional_yield y)
       RGWObjState* astate = nullptr;
       bool check_obj_lock = s->object->have_instance() && s->bucket->get_info().obj_lock_enabled();
 
+      if (s->bucket->get_info().trash_bin_enabled()){
+          // we need prefetch first chuck data when
+          // 1. move head obj to trash
+          // 2. restore head obj from trash
+          if (!s->object->obj_in_bucket_trash_bin() || restore_obj_from_trash_bin){
+              obj_ctx->set_prefetch_data(s->object->get_obj());
+          }
+      }
+
       op_ret = s->object->get_obj_state(this, obj_ctx, *s->bucket.get(), &astate, s->yield, true);
       if (op_ret < 0) {
         if (need_object_expiration() || multipart_delete) {
@@ -5117,7 +5133,7 @@ void RGWDeleteObj::execute(optional_yield y)
       }
 
       op_ret = s->object->delete_object(this, obj_ctx, s->owner, s->bucket_owner, unmod_since,
-					s->system_request, epoch, version_id, s->yield);
+					s->system_request, epoch, version_id, s->yield, false, del_obj_bypass_trash_bin, restore_obj_from_trash_bin);
       if (op_ret >= 0) {
 	delete_marker = s->object->get_delete_marker();
       }
@@ -6647,7 +6663,8 @@ void RGWCompleteMultipart::execute(optional_yield y)
   // remove the upload meta object ; the meta object is not versioned
   // when the bucket is, as that would add an unneeded delete marker
   int r = meta_obj->delete_object(this, s->obj_ctx, ACLOwner(), ACLOwner(), ceph::real_time(), false, 0,
-				  version_id, null_yield, true /* prevent versioning*/ );
+				  version_id, null_yield, true /* prevent versioning*/ ,
+                  true); //  upload metadata object deletion should bypass trash bin
   if (r >= 0)  {
     /* serializer's exclusive lock is released */
     serializer->clear_locked();
@@ -7051,7 +7068,8 @@ void RGWDeleteMultiObj::wait_flush(optional_yield y,
 }
 
 void RGWDeleteMultiObj::handle_individual_object(const rgw_obj_key& o, optional_yield y,
-                                                 boost::asio::deadline_timer *formatter_flush_cond)
+                                                 boost::asio::deadline_timer *formatter_flush_cond,
+                                                 bool del_obj_bypass_trash_bin, bool restore_obj_from_trash_bin)
 {
   std::string version_id;
   RGWObjectCtx *obj_ctx = static_cast<RGWObjectCtx *>(s->obj_ctx);
@@ -7130,6 +7148,15 @@ void RGWDeleteMultiObj::handle_individual_object(const rgw_obj_key& o, optional_
   if (!rgw::sal::RGWObject::empty(obj.get())) {
     RGWObjState* astate = nullptr;
     bool check_obj_lock = obj->have_instance() && bucket->get_info().obj_lock_enabled();
+    if (s->bucket->get_info().trash_bin_enabled()){
+        // we need prefetch first chuck data when
+        // 1. move head obj to trash
+        // 2. restore head obj from trash
+        if (!store->get_object(o)->obj_in_bucket_trash_bin() || restore_obj_from_trash_bin){
+            rgw_obj obj(bucket->get_info().bucket, o);
+            obj_ctx->set_prefetch_data(obj);
+        }
+    }
     const auto ret = obj->get_obj_state(this, obj_ctx, *bucket, &astate, y, true);
 
     if (ret < 0) {
@@ -7170,7 +7197,7 @@ void RGWDeleteMultiObj::handle_individual_object(const rgw_obj_key& o, optional_
   obj->set_atomic(obj_ctx);
 
   op_ret = obj->delete_object(this, obj_ctx, s->owner, s->bucket_owner, ceph::real_time(),
-      			false, 0, version_id, y);
+      			false, 0, version_id, y, false, del_obj_bypass_trash_bin, restore_obj_from_trash_bin);
   if (op_ret == -ENOENT) {
     op_ret = 0;
   }
@@ -7254,6 +7281,17 @@ void RGWDeleteMultiObj::execute(optional_yield y)
     goto done;
   }
 
+  for (iter = multi_delete->objects.begin(); iter != multi_delete->objects.end(); ++iter) {
+      rgw_obj_key obj_key = *iter;
+      if (restore_obj_from_trash_bin){
+          if (!store->get_object(obj_key)->obj_in_bucket_trash_bin()){
+              ldpp_dout(this, 0) << "ERROR: all objects must be in trash bin when batch restore" << dendl;
+              op_ret = -EINVAL;
+              goto error;
+          }
+      }
+  }
+
   for (iter = multi_delete->objects.begin();
         iter != multi_delete->objects.end();
         ++iter) {
@@ -7264,11 +7302,12 @@ void RGWDeleteMultiObj::execute(optional_yield y)
       });
       aio_count++;
       spawn::spawn(y.get_yield_context(), [this, &y, &aio_count, obj_key, &formatter_flush_cond] (yield_context yield) {
-        handle_individual_object(obj_key, optional_yield { y.get_io_context(), yield }, &*formatter_flush_cond); 
+        handle_individual_object(obj_key, optional_yield { y.get_io_context(), yield }, &*formatter_flush_cond,
+                                 del_obj_bypass_trash_bin, restore_obj_from_trash_bin);
         aio_count--;
       }); 
     } else {
-      handle_individual_object(obj_key, y, nullptr);
+      handle_individual_object(obj_key, y, nullptr, del_obj_bypass_trash_bin, restore_obj_from_trash_bin);
     }
   }
   if (formatter_flush_cond) {
@@ -7342,8 +7381,9 @@ bool RGWBulkDelete::Deleter::delete_single(const acct_path_t& path, optional_yie
     std::unique_ptr<rgw::sal::RGWObject> obj = bucket->get_object(path.obj_key);
     obj->set_atomic(s->obj_ctx);
 
+    // for SWIFT, trash bin don't support currently
     ret = obj->delete_object(dpp, s->obj_ctx, bowner, bucket_owner, ceph::real_time(), false, 0,
-			     version_id, s->yield);
+			     version_id, s->yield, false, true);
     if (ret < 0) {
       goto delop_fail;
     }
