@@ -155,6 +155,7 @@ void rgw_cls_obj_complete_op::dump(Formatter *f) const
   f->dump_bool("log_op", log_op);
   f->dump_int("bilog_flags", bilog_flags);
   encode_json("zones_trace", zones_trace, f);
+  f->dump_bool("update_quota_stats", update_quota_stats);
 }
 
 void rgw_cls_link_olh_op::generate_test_instances(list<rgw_cls_link_olh_op*>& o)

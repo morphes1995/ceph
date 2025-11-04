@@ -96,10 +96,14 @@ struct rgw_cls_obj_complete_op
   std::list<cls_rgw_obj_key> remove_objs;
   rgw_zone_set zones_trace;
 
-  rgw_cls_obj_complete_op() : op(CLS_RGW_OP_ADD), log_op(false), bilog_flags(0) {}
+  // for 1) delete object to trash, 2) restore object from trash
+  // stats in omap header should not change
+  bool update_quota_stats;
+
+  rgw_cls_obj_complete_op() : op(CLS_RGW_OP_ADD), log_op(false), bilog_flags(0), update_quota_stats(true){}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(9, 7, bl);
+    ENCODE_START(10, 7, bl);
     uint8_t c = (uint8_t)op;
     encode(c, bl);
     encode(ver.epoch, bl);
@@ -112,10 +116,11 @@ struct rgw_cls_obj_complete_op
     encode(key, bl);
     encode(bilog_flags, bl);
     encode(zones_trace, bl);
+    encode(update_quota_stats, bl);
     ENCODE_FINISH(bl);
  }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(9, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(10, 3, 3, bl);
     uint8_t c;
     decode(c, bl);
     op = (RGWModifyOp)c;
@@ -157,6 +162,9 @@ struct rgw_cls_obj_complete_op
     }
     if (struct_v >= 9) {
       decode(zones_trace, bl);
+    }
+    if (struct_v >= 10) {
+        decode(update_quota_stats, bl);
     }
     DECODE_FINISH(bl);
   }

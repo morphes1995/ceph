@@ -594,3 +594,11 @@ void rgw_complete_aio_completion(librados::AioCompletion* c, int r) {
   librados::CB_AioCompleteAndSafe cb(pc);
   cb(r);
 }
+
+bool with_trash_reserved_prefix(string &obj_path)
+{
+    if (obj_path.compare(0, sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, RGW_TRASH_RESERVATION_PREFIX) == 0) {
+        return true;
+    }
+    return false;
+}

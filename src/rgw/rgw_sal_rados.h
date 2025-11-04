@@ -104,7 +104,9 @@ class RGWRadosObject : public RGWObject {
 			      bool high_precision_time, uint64_t epoch,
 			      std::string& version_id,
 			      optional_yield y,
-			      bool prevent_versioning) override;
+			      bool prevent_versioning,
+                  bool del_obj_bypass_trash_bin,
+                  bool restore_obj_from_trash_bin) override;
     virtual int copy_object(RGWObjectCtx& obj_ctx, RGWUser* user,
                req_info *info, const rgw_zone_id& source_zone,
                rgw::sal::RGWObject* dest_object, rgw::sal::RGWBucket* dest_bucket,

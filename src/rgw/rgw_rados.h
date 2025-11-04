@@ -886,10 +886,16 @@ public:
         ceph::real_time mtime; /* for setting delete marker mtime */
         bool high_precision_time;
         rgw_zone_set *zones_trace;
+
+        bool bucket_trash_bin_enabled;
+        bool obj_in_bucket_trash_bin;
+        bool del_obj_bypass_trash_bin;
 	bool abortmp;
 	uint64_t parts_accounted_size;
 
-        DeleteParams() : versioning_status(0), olh_epoch(0), bilog_flags(0), remove_objs(NULL), high_precision_time(false), zones_trace(nullptr), abortmp(false), parts_accounted_size(0) {}
+        DeleteParams() : versioning_status(0), olh_epoch(0), bilog_flags(0), remove_objs(NULL),
+                         high_precision_time(false), zones_trace(nullptr), abortmp(false), parts_accounted_size(0),
+                         bucket_trash_bin_enabled(false), obj_in_bucket_trash_bin(false), del_obj_bypass_trash_bin(false){}
       } params;
 
       struct DeleteResult {
@@ -902,6 +908,8 @@ public:
       explicit Delete(RGWRados::Object *_target) : target(_target) {}
 
       int delete_obj(optional_yield y, const DoutPrefixProvider *dpp);
+      int restore_obj(optional_yield y, const DoutPrefixProvider *dpp);
+      int copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
     };
 
     struct Stat {
@@ -1012,11 +1020,12 @@ public:
                    const string& etag, const string& content_type,
                    const string& storage_class,
                    bufferlist *acl_bl, RGWObjCategory category,
-		   list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false);
+		   list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false, bool update_quota_stats = true);
       int complete_del(const DoutPrefixProvider *dpp, 
                        int64_t poolid, uint64_t epoch,
                        ceph::real_time& removed_mtime, /* mtime of removed object */
-                       list<rgw_obj_index_key> *remove_objs);
+                       list<rgw_obj_index_key> *remove_objs,
+                       bool update_quota_stats = true);
       int cancel(const DoutPrefixProvider *dpp,
                  std::list<rgw_obj_index_key> *remove_objs);
 
@@ -1056,12 +1065,14 @@ public:
         rgw_obj_key end_marker;
         string ns;
         bool enforce_ns;
+        bool filter_trash;
         RGWAccessListFilter *filter;
         bool list_versions;
 	bool allow_unordered;
 
         Params() :
 	  enforce_ns(true),
+      filter_trash(false),
 	  filter(NULL),
 	  list_versions(false),
 	  allow_unordered(false)
@@ -1269,7 +1280,8 @@ public:
 		 int versioning_status, // versioning flags in enum RGWBucketFlags
 		 uint16_t bilog_flags = 0,
 		 const ceph::real_time& expiration_time = ceph::real_time(),
-		 rgw_zone_set *zones_trace = nullptr);
+		 rgw_zone_set *zones_trace = nullptr,
+         bool del_obj_bypass_trash_bin = true);
 
   int delete_raw_obj(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj);
 
@@ -1428,11 +1440,16 @@ public:
 
   int cls_obj_prepare_op(const DoutPrefixProvider *dpp, BucketShard& bs, RGWModifyOp op, string& tag, rgw_obj& obj, uint16_t bilog_flags, optional_yield y, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModifyOp op, string& tag, int64_t pool, uint64_t epoch,
-                          rgw_bucket_dir_entry& ent, RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
+                          rgw_bucket_dir_entry& ent, RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
+                          rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
   int cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag, int64_t pool, uint64_t epoch, rgw_bucket_dir_entry& ent,
-                           RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
+                           RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
+                           rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
   int cls_obj_complete_del(BucketShard& bs, string& tag, int64_t pool, uint64_t epoch, rgw_obj& obj,
-                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
+                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
+                           rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
+  int cls_obj_complete_rename(BucketShard& bs, string& tag, int64_t pool, uint64_t epoch, rgw_obj& obj,
+                           ceph::real_time& rename_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_complete_cancel(BucketShard& bs, std::string& tag, rgw_obj& obj,
                               std::list<rgw_obj_index_key> *remove_objs,
                               uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
@@ -1473,12 +1490,14 @@ public:
   int cls_bucket_head(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id, vector<rgw_bucket_dir_header>& headers, map<int, string> *bucket_instance_ids = NULL);
   int cls_bucket_head_async(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id, RGWGetDirHeader_CB *ctx, int *num_aio);
 
+  int bi_get_plain(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_olh(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_olh_entry *olh);
   int bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, BIIndexType index_type, rgw_cls_bi_entry *entry);
   void bi_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry);
+  int bi_ent_remove(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry);
   int bi_list(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id, const string& filter_obj, const string& marker, uint32_t max, list<rgw_cls_bi_entry> *entries, bool *is_truncated);
   int bi_list(BucketShard& bs, const string& filter_obj, const string& marker, uint32_t max, list<rgw_cls_bi_entry> *entries, bool *is_truncated);
   int bi_list(const DoutPrefixProvider *dpp, rgw_bucket& bucket, const string& obj_name, const string& marker, uint32_t max,

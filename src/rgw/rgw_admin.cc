@@ -138,6 +138,8 @@ void usage()
   cout << "  bucket sync checkpoint     poll a bucket's sync status until it catches up to its remote\n";
   cout << "  bucket sync disable        disable bucket sync\n";
   cout << "  bucket sync enable         enable bucket sync\n";
+  cout << "  bucket trash disable       disable bucket trash data protection\n";
+  cout << "  bucket trash enable        enable bucket trash data protection\n";
   cout << "  bucket radoslist           list rados objects backing bucket's objects\n";
   cout << "  bi get                     retrieve bucket index object entries\n";
   cout << "  bi put                     store bucket index object entries\n";
@@ -396,6 +398,7 @@ void usage()
   cout << "                             only buckets nearing or over the current max\n";
   cout << "                             objects per shard value\n";
   cout << "   --bypass-gc               when specified with bucket deletion, triggers\n";
+  cout << "   --bypass-trash            force rm object, bypass bucket trash bin \n";
   cout << "                             object deletions by not involving GC\n";
   cout << "   --inconsistent-index      when specified with bucket deletion and bypass-gc set to true,\n";
   cout << "                             ignores bucket index consistency\n";
@@ -614,6 +617,8 @@ enum class OPT {
   BUCKET_SYNC_RUN,
   BUCKET_SYNC_DISABLE,
   BUCKET_SYNC_ENABLE,
+  BUCKET_TRASH_DISABLE,
+  BUCKET_TRASH_ENABLE,
   BUCKET_RM,
   BUCKET_REWRITE,
   BUCKET_RESHARD,
@@ -820,6 +825,8 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket sync run", OPT::BUCKET_SYNC_RUN },
   { "bucket sync disable", OPT::BUCKET_SYNC_DISABLE },
   { "bucket sync enable", OPT::BUCKET_SYNC_ENABLE },
+  { "bucket trash disable", OPT::BUCKET_TRASH_DISABLE },
+  { "bucket trash enable", OPT::BUCKET_TRASH_ENABLE },
   { "bucket rm", OPT::BUCKET_RM },
   { "bucket rewrite", OPT::BUCKET_REWRITE },
   { "bucket reshard", OPT::BUCKET_RESHARD },
@@ -3142,6 +3149,7 @@ int main(int argc, const char **argv)
   int sync_stats = false;
   int reset_stats = false;
   int bypass_gc = false;
+  int bypass_trash = false;
   int warnings_only = false;
   int inconsistent_index = false;
 
@@ -3452,6 +3460,8 @@ int main(int argc, const char **argv)
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &bypass_gc, NULL, "--bypass-gc", (char*)NULL)) {
      // do nothing
+    }else if (ceph_argparse_binary_flag(args, i, &bypass_trash, NULL, "--bypass-trash", (char*)NULL)) {
+        // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &inconsistent_index, NULL, "--inconsistent-index", (char*)NULL)) {
@@ -6119,6 +6129,7 @@ int main(int argc, const char **argv)
 
       do {
         const int remaining = max_entries - count;
+        // admin op can see bucket trash
         ret = list_op.list_objects(dpp(), std::min(remaining, paginate_size),
 				   &result, &common_prefixes, &truncated,
 				   null_yield);
@@ -6754,7 +6765,7 @@ next:
       return -ret;
     }
     rgw_obj_key key(object, object_version);
-    ret = rgw_remove_object(dpp(), store, bucket_info, bucket, key);
+    ret = rgw_remove_object(dpp(), store, bucket_info, bucket, key, bypass_trash);
 
     if (ret < 0) {
       cerr << "ERROR: object remove returned: " << cpp_strerror(-ret) << std::endl;
@@ -8118,6 +8129,26 @@ next:
       cerr << err_msg << std::endl;
       return -ret;
     }
+  }
+
+  if ((opt_cmd == OPT::BUCKET_TRASH_DISABLE) || (opt_cmd == OPT::BUCKET_TRASH_ENABLE)) {
+      if (bucket_name.empty()) {
+          cerr << "ERROR: bucket not specified" << std::endl;
+          return EINVAL;
+      }
+      if (opt_cmd == OPT::BUCKET_TRASH_DISABLE) {
+          bucket_op.set_trash_enabled(false);
+      } else {
+          bucket_op.set_trash_enabled(true);
+      }
+
+      bucket_op.set_tenant(tenant);
+      string err_msg;
+      ret = RGWBucketAdminOp::set_trash(store, bucket_op, dpp(), &err_msg);
+      if (ret < 0) {
+          cerr << err_msg << std::endl;
+          return -ret;
+      }
   }
 
   if (opt_cmd == OPT::BUCKET_SYNC_INFO) {

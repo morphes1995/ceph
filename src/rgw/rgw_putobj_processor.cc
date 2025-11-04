@@ -159,7 +159,8 @@ RadosWriter::~RadosWriter()
     std::string version_id;
     ldpp_dout(dpp, 5) << "NOTE: we are going to process the head obj (" << *raw_head << ")" << dendl;
     int r = head_obj->delete_object(dpp, &obj_ctx, ACLOwner(), bucket->get_acl_owner(), ceph::real_time(),
-				    false, 0, version_id, null_yield);
+				    false, 0, version_id, null_yield,
+                    false, true, false);// when delete partial uploaded head object, bypass trash bin
     if (r < 0 && r != -ENOENT) {
       ldpp_dout(dpp, 0) << "WARNING: failed to remove obj (" << *raw_head << "), leaked" << dendl;
     }
