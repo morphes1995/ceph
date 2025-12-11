@@ -568,5 +568,7 @@ bool s3_multipart_abort_header(
   std::string& rule_id);
 
 } // namespace rgw::lc
+inline void get_lc_oid(CephContext *cct,
+                       const string& shard_id, string *oid);
 
 #endif

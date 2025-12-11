@@ -275,8 +275,13 @@ bool RGWLC::if_already_run_today(time_t start_date)
   localtime_r(&start_date, &bdt);
 
   if (cct->_conf->rgw_lc_debug_interval > 0) {
-    if (now - start_date < cct->_conf->rgw_lc_debug_interval)
-      return true;
+    if (now - start_date < cct->_conf->rgw_lc_debug_interval){
+        dout(5) << "RGWLC: rule already run today, interval: " << now-start_date
+                << " config interval: "<< cct->_conf->rgw_lc_debug_interval
+                << dendl;
+        return true;
+    }
+
     else
       return false;
   }
@@ -285,8 +290,12 @@ bool RGWLC::if_already_run_today(time_t start_date)
   bdt.tm_min = 0;
   bdt.tm_sec = 0;
   begin_of_day = mktime(&bdt);
-  if (now - begin_of_day < 24*60*60)
-    return true;
+  if (now - begin_of_day < 24*60*60){
+      dout(5) << "RGWLC: rule already run today, interval: " << now-begin_of_day
+              << " config interval: "<<  24*60*60
+              << dendl;
+      return true;
+  }
   else
     return false;
 }
@@ -436,6 +445,9 @@ public:
   void set_prefix(const string& p) {
     prefix = p;
     list_params.prefix = prefix;
+    if (p != RGW_TRASH_RESERVATION_PREFIX) {
+        list_params.filter_trash = true;
+    }
   }
 
   int init(const DoutPrefixProvider *dpp) {
@@ -1470,23 +1482,41 @@ int RGWLC::bucket_lc_process(string& shard_id, LCWorker* worker,
     return -ENOENT;
   }
 
-  map<string, bufferlist>::iterator aiter
-    = bucket->get_attrs().find(RGW_ATTR_LC);
-  if (aiter == bucket->get_attrs().end()) {
-    ldpp_dout(this, 0) << "WARNING: bucket_attrs.find(RGW_ATTR_LC) failed for "
-		       << bucket_name << " (terminates bucket_lc_process(...))"
-		       << dendl;
-    return 0;
-  }
+  if (result.size() == 4 && result[3] == ".trash"){
+      if (bucket->get_info().trash_bin_enabled()){
+          int days = bucket->get_info().trash_obj_expired_days;
+          if (days > 0){
+              // generate a virtual lc rule, used to clear trash expired objs
+              lc_op trash_clear_op{"trash_clear_rule"};
+              trash_clear_op.status = true;
+              trash_clear_op.expiration = days;
+              config.get_prefix_map().emplace(RGW_TRASH_RESERVATION_PREFIX, std::move(trash_clear_op));
+              ldpp_dout(this, 20) << __func__ <<  "() , trash_clear_rule add for bucket: "<< bucket->get_name() << dendl;
+          }
+      }else{
+          // stale trash lc entry , remove it
+          return -ENOENT;
+      }
+  }else{
+      // normal LC process
+      map<string, bufferlist>::iterator aiter
+              = bucket->get_attrs().find(RGW_ATTR_LC);
+      if (aiter == bucket->get_attrs().end()) {
+          ldpp_dout(this, 0) << "WARNING: bucket_attrs.find(RGW_ATTR_LC) failed for "
+                             << bucket_name << " (terminates bucket_lc_process(...))"
+                             << dendl;
+          return 0;
+      }
 
-  bufferlist::const_iterator iter{&aiter->second};
-  try {
-      config.decode(iter);
-    } catch (const buffer::error& e) {
-      ldpp_dout(this, 0) << __func__ <<  "() decode life cycle config failed"
-			 << dendl;
-      return -1;
-    }
+      bufferlist::const_iterator iter{&aiter->second};
+      try {
+          config.decode(iter);
+      } catch (const buffer::error& e) {
+          ldpp_dout(this, 0) << __func__ <<  "() decode life cycle config failed"
+                             << dendl;
+          return -1;
+      }
+  }
 
   auto pf = [](RGWLC::LCWorker* wk, WorkQ* wq, WorkItem& wi) {
     auto wt =
@@ -1934,7 +1964,7 @@ void RGWLifecycleConfiguration::generate_test_instances(
   o.push_back(new RGWLifecycleConfiguration);
 }
 
-static inline void get_lc_oid(CephContext *cct,
+inline void get_lc_oid(CephContext *cct,
 			      const string& shard_id, string *oid)
 {
   int max_objs =
@@ -2009,6 +2039,15 @@ int RGWLC::set_bucket_config(RGWBucketInfo& bucket_info,
                          const map<string, bufferlist>& bucket_attrs,
                          RGWLifecycleConfiguration *config)
 {
+
+  for(auto it = config->get_prefix_map().begin(); it!=config->get_prefix_map().end(); it++){
+      string prefix = it->first;
+      if (with_trash_reserved_prefix(prefix)){
+          ldpp_dout(this, 0) << "RGWLC::set_bucket_config() lc rule with trash reserved prefix is invalid" << dendl;
+          return -EINVAL;
+      }
+  }
+
   map<string, bufferlist> attrs = bucket_attrs;
   bufferlist lc_bl;
   config->encode(lc_bl);

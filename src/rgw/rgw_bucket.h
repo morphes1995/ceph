@@ -263,6 +263,7 @@ struct RGWBucketAdminOpState {
   bool sync_bucket;
   bool trash_enabled;
   bool bypass_trash_bin;
+  int trash_expired_days;
   int max_aio = 0;
 
   rgw_bucket bucket;
@@ -299,6 +300,7 @@ struct RGWBucketAdminOpState {
 
   void set_sync_bucket(bool value) { sync_bucket = value; }
   void set_trash_enabled(bool value) { trash_enabled = value; }
+  void set_trash_expired_days(int days) {trash_expired_days = days;}
 
   rgw_user& get_user_id() { return uid; }
   std::string& get_user_display_name() { return display_name; }
@@ -329,7 +331,7 @@ struct RGWBucketAdminOpState {
 
   RGWBucketAdminOpState() : list_buckets(false), stat_buckets(false), check_objects(false), 
                             fix_index(false), delete_child_objects(false),
-                            bucket_stored(false), sync_bucket(true), bypass_trash_bin(false)  {}
+                            bucket_stored(false), sync_bucket(true), bypass_trash_bin(false), trash_expired_days(-1){}
 };
 
 /*
@@ -383,7 +385,7 @@ public:
   int get_policy(RGWBucketAdminOpState& op_state, RGWAccessControlPolicy& policy, optional_yield y, const DoutPrefixProvider *dpp);
   int sync(RGWBucketAdminOpState& op_state, map<string, bufferlist> *attrs, const DoutPrefixProvider *dpp, std::string *err_msg = NULL);
   int set_trash(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg);
-
+  int trash_update(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg);
   void clear_failure() { failure = false; }
 
   const RGWBucketInfo& get_bucket_info() const { return bucket_info; }
@@ -429,6 +431,7 @@ public:
 
   static int sync_bucket(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg = NULL);
   static int set_trash(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg);
+  static int trash_update(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg);
 };
 
 struct rgw_ep_info {

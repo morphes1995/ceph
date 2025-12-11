@@ -140,6 +140,7 @@ void usage()
   cout << "  bucket sync enable         enable bucket sync\n";
   cout << "  bucket trash disable       disable bucket trash data protection\n";
   cout << "  bucket trash enable        enable bucket trash data protection\n";
+  cout << "  bucket trash update        update bucket trash params\n";
   cout << "  bucket radoslist           list rados objects backing bucket's objects\n";
   cout << "  bi get                     retrieve bucket index object entries\n";
   cout << "  bi put                     store bucket index object entries\n";
@@ -399,6 +400,7 @@ void usage()
   cout << "                             objects per shard value\n";
   cout << "   --bypass-gc               when specified with bucket deletion, triggers\n";
   cout << "   --bypass-trash            force rm object, bypass bucket trash bin \n";
+  cout << "   --trash_expired_days      reserve days for deleted objs in trash bin \n";
   cout << "                             object deletions by not involving GC\n";
   cout << "   --inconsistent-index      when specified with bucket deletion and bypass-gc set to true,\n";
   cout << "                             ignores bucket index consistency\n";
@@ -619,6 +621,7 @@ enum class OPT {
   BUCKET_SYNC_ENABLE,
   BUCKET_TRASH_DISABLE,
   BUCKET_TRASH_ENABLE,
+  BUCKET_TRASH_UPDATE,
   BUCKET_RM,
   BUCKET_REWRITE,
   BUCKET_RESHARD,
@@ -827,6 +830,7 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket sync enable", OPT::BUCKET_SYNC_ENABLE },
   { "bucket trash disable", OPT::BUCKET_TRASH_DISABLE },
   { "bucket trash enable", OPT::BUCKET_TRASH_ENABLE },
+  { "bucket trash update", OPT::BUCKET_TRASH_UPDATE },
   { "bucket rm", OPT::BUCKET_RM },
   { "bucket rewrite", OPT::BUCKET_REWRITE },
   { "bucket reshard", OPT::BUCKET_RESHARD },
@@ -3150,6 +3154,7 @@ int main(int argc, const char **argv)
   int reset_stats = false;
   int bypass_gc = false;
   int bypass_trash = false;
+  int trash_expired_days = -1;
   int warnings_only = false;
   int inconsistent_index = false;
 
@@ -3461,8 +3466,18 @@ int main(int argc, const char **argv)
     } else if (ceph_argparse_binary_flag(args, i, &bypass_gc, NULL, "--bypass-gc", (char*)NULL)) {
      // do nothing
     }else if (ceph_argparse_binary_flag(args, i, &bypass_trash, NULL, "--bypass-trash", (char*)NULL)) {
-        // do nothing
-    } else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
+     // do nothing
+    }else if (ceph_argparse_witharg(args, i, &val, "--trash_expired_days", (char*)NULL)) {
+     trash_expired_days = (int)strict_strtol(val.c_str(), 10, &err);
+     if (!err.empty()) {
+         cerr << "ERROR: failed to parse trash_expired_days: " << err << std::endl;
+         return EINVAL;
+     }
+     if (trash_expired_days < 0){
+         cerr << "ERROR: trash_expired_days must >= 0" << std::endl;
+         return EINVAL;
+     }
+    }else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &inconsistent_index, NULL, "--inconsistent-index", (char*)NULL)) {
      // do nothing
@@ -8148,6 +8163,24 @@ next:
       if (ret < 0) {
           cerr << err_msg << std::endl;
           return -ret;
+      }
+  }
+
+  if (opt_cmd == OPT::BUCKET_TRASH_UPDATE) {
+      if (bucket_name.empty()) {
+          cerr << "ERROR: bucket not specified" << std::endl;
+          return EINVAL;
+      }
+      if (trash_expired_days >= 0 ){
+          bucket_op.set_trash_expired_days(trash_expired_days);
+
+          bucket_op.set_tenant(tenant);
+          string err_msg;
+          ret = RGWBucketAdminOp::trash_update(store, bucket_op, dpp(), &err_msg);
+          if (ret < 0) {
+              cerr << err_msg << std::endl;
+              return -ret;
+          }
       }
   }
 
