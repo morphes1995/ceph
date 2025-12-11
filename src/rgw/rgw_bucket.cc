@@ -1084,7 +1084,79 @@ int RGWBucket::set_trash(RGWBucketAdminOpState &op_state, const DoutPrefixProvid
     if (op_state.trash_enabled) {
         bucket_info.flags = bucket_info.flags | BUCKET_TRASH_ENABLED;
     } else {
+        bucket_info.trash_obj_expired_days = 0; // reset to 0
         bucket_info.flags = bucket_info.flags & (~BUCKET_TRASH_ENABLED) ;
+    }
+
+    // update special lc rule to clear expired objs in trash
+    string shard_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker, ".trash");
+    string oid;
+    get_lc_oid(store->ctx(), shard_id, &oid);
+
+    #define COOKIE_LEN 16
+    char cookie_buf[COOKIE_LEN + 1];
+    gen_rand_alphanumeric( store->ctx(), cookie_buf, sizeof(cookie_buf) - 1);
+    string cookie = cookie_buf;
+
+    rgw::sal::Lifecycle::LCEntry entry;
+    entry.bucket = shard_id;
+    entry.status = lc_uninitial;
+    int max_lock_secs = store->ctx()->_conf->rgw_lc_lock_max_time;
+
+    rgw::sal::LCSerializer* lock = store->get_lifecycle()->get_serializer(lc_index_lock_name,
+                                                          oid,
+                                                          cookie);
+    utime_t time(max_lock_secs, 0);
+    int ret;
+    do {
+        ret = lock->try_lock(dpp, time, null_yield);
+        if (ret == -EBUSY || ret == -EEXIST) {
+            ldpp_dout(dpp, 0) << "RGWLC: failed to acquire lock on " << oid << ", sleep 5, try again" << dendl;
+            sleep(5);
+            continue;
+        }
+        if (ret < 0) {
+            set_err_msg(err_msg, "RGWLC: failed to acquire lock on " + oid + ", ret: " + cpp_strerror(-ret));
+            return ret;
+        }
+
+        if (op_state.trash_enabled){
+            store->get_lifecycle()->set_entry(oid, entry);
+        }else{
+            store->get_lifecycle()->rm_entry(oid, entry);
+        }
+
+        if (ret < 0) {
+            set_err_msg(err_msg, "RGWLC: failed to update on " + oid + ", ret: " + cpp_strerror(-ret));
+            return ret;
+        }
+        break;
+    } while(true);
+    lock->unlock();
+    delete lock;
+
+    // update bucket info
+    r = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &attrs, dpp);
+    if (r < 0) {
+        set_err_msg(err_msg, "ERROR: failed writing bucket instance info: " + cpp_strerror(-r));
+        return r;
+    }
+
+    return r;
+}
+
+int RGWBucket::trash_update(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg) {
+    rgw_bucket bucket = op_state.get_bucket();
+    RGWBucketInfo bucket_info;
+    map<string, bufferlist> attrs;
+    int r = store->getRados()->get_bucket_info(store->svc(), bucket.tenant, bucket.name, bucket_info, NULL, null_yield,
+                                               dpp, &attrs);
+    if (r < 0) {
+        set_err_msg(err_msg, "could not get bucket info for bucket=" + bucket.name + ": " + cpp_strerror(-r));
+        return r;
+    }
+    if (op_state.trash_expired_days >= 0){
+        bucket_info.trash_obj_expired_days = op_state.trash_expired_days;
     }
 
     r = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &attrs, dpp);
@@ -1346,6 +1418,16 @@ int RGWBucketAdminOp::set_trash(rgw::sal::RGWRadosStore *store, RGWBucketAdminOp
     return bucket.set_trash(op_state, dpp, err_msg);
 }
 
+int RGWBucketAdminOp::trash_update(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg)
+{
+    RGWBucket bucket;
+
+    int ret = bucket.init(store, op_state, null_yield, dpp);
+    if (ret < 0)
+        return ret;
+    return bucket.trash_update(op_state, dpp, err_msg);
+}
+
 static int bucket_stats(rgw::sal::RGWRadosStore *store,
 			const std::string& tenant_name,
 			const std::string& bucket_name,
@@ -1399,6 +1481,7 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   dump_bucket_usage(stats, formatter);
   encode_json("bucket_quota", bucket_info.quota, formatter);
   formatter->dump_bool("trash enabled", bucket_info.trash_bin_enabled());
+  formatter->dump_int("trash obj expired days", bucket_info.trash_obj_expired_days);
 
   // bucket tags
   auto iter = attrs.find(RGW_ATTR_TAGS);

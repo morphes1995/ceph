@@ -1035,6 +1035,8 @@ struct RGWBucketInfo {
 
   std::optional<rgw_sync_policy_info> sync_policy;
 
+  int trash_obj_expired_days{0}; // 0 means obj in trash bin never expired
+
   void encode(bufferlist& bl) const;
   void decode(bufferlist::const_iterator& bl);
 

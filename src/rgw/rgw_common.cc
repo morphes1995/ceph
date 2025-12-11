@@ -2149,7 +2149,7 @@ RGWBucketInfo::~RGWBucketInfo()
 }
 
 void RGWBucketInfo::encode(bufferlist& bl) const {
-  ENCODE_START(23, 4, bl);
+  ENCODE_START(24, 4, bl);
   encode(bucket, bl);
   encode(owner.id, bl);
   encode(flags, bl);
@@ -2183,6 +2183,7 @@ void RGWBucketInfo::encode(bufferlist& bl) const {
   }
   encode(layout, bl);
   encode(owner.ns, bl);
+  encode(trash_obj_expired_days, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -2263,6 +2264,9 @@ void RGWBucketInfo::decode(bufferlist::const_iterator& bl) {
   }
   if (struct_v >= 23) {
     decode(owner.ns, bl);
+  }
+  if (struct_v >= 24) {
+      decode(trash_obj_expired_days, bl);
   }
 
   if (layout.logs.empty() &&
