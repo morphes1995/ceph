@@ -745,6 +745,16 @@ int RGWAsyncRemoveObj::_send_request(const DoutPrefixProvider *dpp)
   ldpp_dout(dpp, 0) << __func__ << "(): deleting obj=" << obj << dendl;
 
   obj_ctx.set_atomic(obj);
+  bool restore_obj_from_trash_bin = bilog_flags & RGW_BILOG_FLAG_TRASH_RESTORE_OP;
+  bool obj_in_bucket_trash_bin = store->get_object(key)->obj_in_bucket_trash_bin();
+  if (bucket_info.trash_bin_enabled()){
+      // we need prefetch first chuck data when
+      // 1. move head obj to trash
+      // 2. restore head obj from trash
+      if (!obj_in_bucket_trash_bin || restore_obj_from_trash_bin){
+          obj_ctx.set_prefetch_data(obj);
+      }
+  }
 
   RGWObjState *state;
 
@@ -756,8 +766,12 @@ int RGWAsyncRemoveObj::_send_request(const DoutPrefixProvider *dpp)
 
   /* has there been any racing object write? */
   if (del_if_older && (state->mtime > timestamp)) {
-    ldpp_dout(dpp, 20) << __func__ << "(): skipping object removal obj=" << obj << " (obj mtime=" << state->mtime << ", request timestamp=" << timestamp << ")" << dendl;
-    return 0;
+    if (!obj_in_bucket_trash_bin){
+        // when multisite sync del ops,  when slave zone trash obj del time > master zone trash obj time
+        // we need to avoid skipping this trash obj removal
+        ldpp_dout(dpp, 20) << __func__ << "(): skipping object removal obj=" << obj << " (obj mtime=" << state->mtime << ", request timestamp=" << timestamp << ")" << dendl;
+        return 0;
+    }
   }
 
   RGWAccessControlPolicy policy;
@@ -780,7 +794,9 @@ int RGWAsyncRemoveObj::_send_request(const DoutPrefixProvider *dpp)
   del_op.params.bucket_owner = bucket_info.owner;
   del_op.params.obj_owner = policy.get_owner();
   if (del_if_older) {
-    del_op.params.unmod_since = timestamp;
+      if (!obj_in_bucket_trash_bin){
+          del_op.params.unmod_since = timestamp;
+      }
   }
   if (versioned) {
     del_op.params.versioning_status = BUCKET_VERSIONED;
@@ -793,9 +809,17 @@ int RGWAsyncRemoveObj::_send_request(const DoutPrefixProvider *dpp)
   del_op.params.high_precision_time = true;
   del_op.params.zones_trace = &zones_trace;
 
-  ret = del_op.delete_obj(null_yield, dpp);
-  if (ret < 0) {
-    ldpp_dout(dpp, 20) << __func__ << "(): delete_obj() obj=" << obj << " returned ret=" << ret << dendl;
+  del_op.params.bucket_trash_bin_enabled = bucket_info.trash_bin_enabled();
+  del_op.params.obj_in_bucket_trash_bin = obj_in_bucket_trash_bin;
+  del_op.params.del_obj_bypass_trash_bin = bilog_flags & RGW_BILOG_FLAG_FORCE_DEL_OP;
+
+  if(restore_obj_from_trash_bin){
+      ret = del_op.restore_obj(null_yield, dpp);
+  }else{
+      ret = del_op.delete_obj(null_yield, dpp);
+      if (ret < 0) {
+          ldpp_dout(dpp, 20) << __func__ << "(): delete_obj() obj=" << obj << " returned ret=" << ret << dendl;
+      }
   }
   return ret;
 }

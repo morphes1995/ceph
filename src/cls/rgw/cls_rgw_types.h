@@ -98,6 +98,10 @@ enum RGWModifyOp {
 
 enum RGWBILogFlags {
   RGW_BILOG_FLAG_VERSIONED_OP = 0x1,
+
+  // for bucket trash bin used, to distinguish different delete op
+  RGW_BILOG_FLAG_FORCE_DEL_OP = 0x2,
+  RGW_BILOG_FLAG_TRASH_RESTORE_OP = 0x4,
 };
 
 enum RGWCheckMTimeType {
@@ -645,7 +649,7 @@ struct rgw_bi_log_entry {
   std::string instance;
   ceph::real_time timestamp;
   rgw_bucket_entry_ver ver;
-  RGWModifyOp op; // todo bucket trash: compat with bucket sync
+  RGWModifyOp op;
   RGWPendingState state;
   uint64_t index_ver;
   std::string tag;

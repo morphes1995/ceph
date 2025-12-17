@@ -802,6 +802,7 @@ void RGWBucketInfo::dump(Formatter *f) const
   if (!empty_sync_policy()) {
     encode_json("sync_policy", *sync_policy, f);
   }
+  encode_json("trash_obj_expired_days", trash_obj_expired_days, f);
 }
 
 void RGWBucketInfo::decode_json(JSONObj *obj) {
@@ -845,6 +846,10 @@ void RGWBucketInfo::decode_json(JSONObj *obj) {
   if (!sp.empty()) {
     set_sync_policy(std::move(sp));
   }
+
+  int expired_days = 0;
+  JSONDecoder::decode_json("trash_obj_expired_days", expired_days, obj);
+  trash_obj_expired_days = expired_days;
 }
 
 void rgw_sync_directional_rule::dump(Formatter *f) const

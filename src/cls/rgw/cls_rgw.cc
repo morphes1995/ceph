@@ -2596,7 +2596,7 @@ static int rgw_bi_ent_remove_op(cls_method_context_t hctx, bufferlist *in, buffe
 {
     CLS_LOG(10, "entered %s()\n", __func__);
     // decode request
-    rgw_cls_bi_put_op op; // we reuse put op
+    rgw_cls_bi_remove_op op; // we reuse put op
     auto iter = in->cbegin();
     try {
         decode(op, iter);
@@ -2606,9 +2606,38 @@ static int rgw_bi_ent_remove_op(cls_method_context_t hctx, bufferlist *in, buffe
     }
 
     rgw_cls_bi_entry& entry = op.entry;
+    rgw_bucket_dir_entry e;
+    rgw_bucket_dir_header header;
+    if (op.log_op){
+        auto biter = entry.data.cbegin();
+        try {
+            decode(e, biter);
+        } catch (ceph::buffer::error& err) {
+            CLS_LOG(0, "ERROR: %s: failed to decode buffer (size=%d)", __func__, entry.data.length());
+            return -EINVAL;
+        }
+
+        int rc = read_bucket_header(hctx, &header);
+        if (rc < 0) {
+            CLS_LOG(1, "ERROR: rgw_bucket_complete_op(): failed to read header\n");
+            return -EINVAL;
+        }
+    }
+
     int r = cls_cxx_map_remove_key(hctx, entry.idx);
     if (r < 0) {
         CLS_LOG(0, "ERROR: %s: cls_cxx_map_remove_key() returned r=%d", __func__, r);
+        return r;
+    }
+
+    if (op.log_op){
+        r = log_index_operation(hctx, e.key, CLS_RGW_OP_DEL, "", e.meta.mtime,
+                                 e.ver, CLS_RGW_STATE_COMPLETE, header.ver,
+                                 header.max_marker, op.bilog_flag, NULL, NULL,
+                                 &op.zones_trace);
+        if (r < 0) {
+            return r;
+        }
     }
 
     return 0;

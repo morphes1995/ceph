@@ -22,6 +22,8 @@
 #include "rgw_cr_rest.h"
 #include "rgw_http_client.h"
 #include "rgw_sync_trace.h"
+#include "rgw_bucket.h"
+#include "rgw_lc.h"
 
 #include "cls/lock/cls_lock_client.h"
 
@@ -1088,7 +1090,49 @@ class RGWAsyncMetaStoreEntry : public RGWAsyncRadosRequest {
   bufferlist bl;
   const DoutPrefixProvider *dpp;
 protected:
-  int _send_request(const DoutPrefixProvider *dpp) override {
+    int _send_request(const DoutPrefixProvider *dpp) override {
+    string type;
+    string entry;
+    store->ctl()->meta.mgr->parse_metadata_key(raw_key, type, entry);
+    if (type == "bucket.instance"){
+        JSONParser parser;
+        if (!parser.parse(bl.c_str(), bl.length())) {
+            return -EINVAL;
+        }
+        JSONObj *jo = parser.find_obj("data");
+        if (!jo) {
+            return -EINVAL;
+        }
+
+        RGWBucketCompleteInfo bci;
+        try {
+            decode_json_obj(bci, jo);
+        } catch (JSONDecoder::err& e) {
+            return EINVAL;
+        }
+
+        std::unique_ptr<rgw::sal::RGWBucket> old_bucket;
+        bool exist = true;
+        int r = store->get_bucket(dpp, store->get_user(bci.info.owner).get(),
+                                        bci.info.bucket.tenant, bci.info.bucket.name, &old_bucket, null_yield);
+        if (r < 0) {
+            if (r != -ENOENT) {
+                return r;
+            }
+            exist = false;
+        }
+
+        if (!exist || old_bucket->get_info().trash_bin_enabled() != bci.info.trash_bin_enabled()){
+            // update related trash lc entry when:
+            // 1. bucket did not exist in this zone
+            // 2. trash status of existed bucket changed
+            r = update_trash_lc_entry(bci);
+            if (r < 0){
+                return r;
+            }
+        }
+    }
+
     int ret = store->ctl()->meta.mgr->put(raw_key, bl, null_yield, dpp, RGWMDLogSyncType::APPLY_ALWAYS, true);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "ERROR: can't store key: " << raw_key << " ret=" << ret << dendl;
@@ -1102,6 +1146,55 @@ public:
                        bufferlist& _bl,
                        const DoutPrefixProvider *dpp) : RGWAsyncRadosRequest(caller, cn), store(_store),
                                           raw_key(_raw_key), bl(_bl), dpp(dpp) {}
+private:
+    int update_trash_lc_entry(RGWBucketCompleteInfo &bci) {
+        // update special lc rule to clear expired objs in trash
+        string shard_id = string_join_reserve(':', bci.info.bucket.tenant, bci.info.bucket.name, bci.info.bucket.marker, ".trash");
+        string oid;
+        get_lc_oid(store->ctx(), shard_id, &oid);
+
+        #define COOKIE_LEN 16
+        char cookie_buf[COOKIE_LEN + 1];
+        gen_rand_alphanumeric( store->ctx(), cookie_buf, sizeof(cookie_buf) - 1);
+        string cookie = cookie_buf;
+
+        rgw::sal::Lifecycle::LCEntry entry;
+        entry.bucket = shard_id;
+        entry.status = lc_uninitial;
+        int max_lock_secs = store->ctx()->_conf->rgw_lc_lock_max_time;
+
+        rgw::sal::LCSerializer* lock = store->get_lifecycle()->get_serializer(lc_index_lock_name,
+                                                                              oid,
+                                                                              cookie);
+        utime_t time(max_lock_secs, 0);
+        int ret;
+        do {
+            ret = lock->try_lock(dpp, time, null_yield);
+            if (ret == -EBUSY || ret == -EEXIST) {
+                ldpp_dout(dpp, 0) << "RGWLC: failed to acquire lock on " << oid << ", sleep 5, try again" << dendl;
+                sleep(5);
+                continue;
+            }
+            if (ret < 0) {
+                return ret;
+            }
+
+            if (bci.info.trash_bin_enabled()){
+                store->get_lifecycle()->set_entry(oid, entry);
+            }else{
+                store->get_lifecycle()->rm_entry(oid, entry);
+            }
+
+            if (ret < 0) {
+                return ret;
+            }
+            break;
+        } while(true);
+        lock->unlock();
+        delete lock;
+
+        return 0;
+    }
 };
 
 

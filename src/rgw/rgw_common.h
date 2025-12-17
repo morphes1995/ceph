@@ -175,6 +175,7 @@ using ceph::crypto::MD5;
 # define RGW_TRASH_RESERVATION_PREFIX ".trash/"
 # define RGW_TRASH_FORCE_DELETE "rgw_trash_force_delete"
 # define RGW_TRASH_OBJ_RESTORE "rgw_trash_obj_restore"
+# define RGW_TRASH_SHOW "rgw_trash_show"
 # define RGW_TRASH_OBJ_ORIGIN_MTIME RGW_ATTR_PREFIX "origin_mtime"
 
 #define STATUS_CREATED           1900

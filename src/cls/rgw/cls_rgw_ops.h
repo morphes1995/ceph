@@ -693,6 +693,34 @@ struct rgw_cls_bi_put_op {
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_put_op)
 
+struct rgw_cls_bi_remove_op {
+    rgw_cls_bi_entry entry;
+    bool log_op;
+    uint16_t bilog_flag;
+    rgw_zone_set zones_trace;
+
+    rgw_cls_bi_remove_op():log_op(false), bilog_flag(0) {}
+
+    void encode(ceph::buffer::list& bl) const {
+        ENCODE_START(1, 1, bl);
+            encode(entry, bl);
+            encode(log_op, bl);
+            encode(bilog_flag, bl);
+            encode(zones_trace, bl);
+        ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+        DECODE_START(1, bl);
+            decode(entry, bl);
+            decode(log_op, bl);
+            decode(bilog_flag, bl);
+            decode(zones_trace, bl);
+        DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_remove_op)
+
 struct rgw_cls_bi_list_op {
   uint32_t max;
   std::string name_filter; // limit resultto one object and its instances

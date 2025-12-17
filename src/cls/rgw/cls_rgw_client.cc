@@ -465,11 +465,16 @@ void cls_rgw_bi_put(ObjectWriteOperation& op, const string oid, rgw_cls_bi_entry
   op.exec(RGW_CLASS, RGW_BI_PUT, in);
 }
 
-int cls_rgw_bi_ent_remove(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry)
+int cls_rgw_bi_ent_remove(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace)
 {
     bufferlist in, out;
-    rgw_cls_bi_put_op call; // we reuse bi_put_op
+    rgw_cls_bi_remove_op call;
     call.entry = entry;
+    call.bilog_flag = bilog_flag;
+    call.log_op = log_op;
+    if (zones_trace){
+        call.zones_trace = *zones_trace;
+    }
     encode(call, in);
     int r = io_ctx.exec(oid, RGW_CLASS, RGW_BI_ENT_RM, in, out);
     if (r < 0)

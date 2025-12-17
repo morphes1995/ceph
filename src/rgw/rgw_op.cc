@@ -2984,7 +2984,7 @@ void RGWListBucket::execute(optional_yield y)
   params.delim = delimiter;
   params.marker = marker;
   params.end_marker = end_marker;
-  params.filter_trash = true;
+  params.filter_trash = !show_trash;
   params.list_versions = list_versions;
   params.allow_unordered = allow_unordered;
   params.shard_id = shard_id;

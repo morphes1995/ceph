@@ -1492,6 +1492,11 @@ int RGWListBucket_ObjStore_S3::get_params(optional_yield y)
     marker.name = s->info.args.get("key-marker");
     marker.instance = s->info.args.get("version-id-marker");
   }
+
+  if (s->info.args.exists(RGW_TRASH_SHOW)) {
+      show_trash = true;
+  }
+
   return 0;
 }
 
@@ -1508,6 +1513,10 @@ if(!continuation_token_exist) {
   marker = startAfter;
 } else {
   marker = continuation_token;
+}
+
+if (s->info.args.exists(RGW_TRASH_SHOW)) {
+    show_trash = true;
 }
 return 0;
 }

@@ -1916,16 +1916,8 @@ int RGWRados::Bucket::List::list_objects_ordered(
       }
 
       if (params.filter_trash) {
-          if (obj.name == RGW_TRASH_RESERVATION_PREFIX){
-              // hide the trash reserved common prefix
+          if (with_trash_reserved_prefix(obj.name)){
               continue;
-          }
-
-          if (!with_trash_reserved_prefix(params.prefix)) {
-              if (with_trash_reserved_prefix(obj.name)){
-                  // in case delim is empty, only show trash bin content with trash reserved common prefix
-                  continue;
-              }
           }
       }
 
@@ -2182,16 +2174,8 @@ int RGWRados::Bucket::List::list_objects_unordered(const DoutPrefixProvider *dpp
         continue;
 
       if (params.filter_trash) {
-          if (obj.name == RGW_TRASH_RESERVATION_PREFIX){
-              // hide the trash reserved common prefix
+          if (with_trash_reserved_prefix(obj.name)){
               continue;
-          }
-
-          if (!with_trash_reserved_prefix(params.prefix)) {
-              if (with_trash_reserved_prefix(obj.name)){
-                  // in case delim is empty, only show trash bin content with trash reserved common prefix
-                  continue;
-              }
           }
       }
 
@@ -5060,14 +5044,25 @@ struct tombstone_entry {
 int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp){
     RGWRados *store = target->get_store();
     rgw_obj& obj = target->get_obj();
+
+    RGWObjState *state;
+    int r = target->get_state(dpp, &state, false, y);
+    if (r < 0)
+        return r;
+    if (!state->exists) {
+        ldpp_dout(dpp, 0) << "ERROR: head did not exist when move to obj (" << state->obj.key.name << ") to trash bin, r:" << r << dendl;
+        target->invalidate_state();
+        return -ENOENT;
+    }
+
     rgw_obj rgw_obj_in_trash = obj;
-    ceph::real_time now = real_clock::now();
     std::stringstream ss;
-    ss << now;
-    rgw_obj_in_trash.key.name = RGW_TRASH_RESERVATION_PREFIX + rgw_obj_in_trash.key.name + ".DELETED_AT_" + ss.str(); // obj name when move to trash bin
+    ss << state->mtime;
+    rgw_obj_in_trash.key.name = RGW_TRASH_RESERVATION_PREFIX + rgw_obj_in_trash.key.name + ".CREATED_AT_" + ss.str(); // obj name with create time
+    rgw_obj_in_trash.index_hash_source = obj.key.name; // trash obj and original obj should in same shard
 
     rgw_rados_ref ref;
-    int r = store->get_obj_head_ref(dpp, target->get_bucket_info(), obj, &ref);
+    r = store->get_obj_head_ref(dpp, target->get_bucket_info(), obj, &ref);
     if (r < 0) {
         return r;
     }
@@ -5076,16 +5071,6 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     r = store->get_obj_head_ref(dpp, target->get_bucket_info(), rgw_obj_in_trash, &obj_in_trash_ref);
     if (r < 0) {
         return r;
-    }
-
-    RGWObjState *state;
-    r = target->get_state(dpp, &state, false, y);
-    if (r < 0)
-        return r;
-    if (!state->exists) {
-        ldpp_dout(dpp, 0) << "ERROR: head did not exist when move to obj (" << state->obj.key.name << ") to trash bin, r:" << r << dendl;
-        target->invalidate_state();
-        return -ENOENT;
     }
 
     // read bucket index entry
@@ -5117,10 +5102,15 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     encode(state->mtime, mtime_bl);
     new_head_op.setxattr(RGW_TRASH_OBJ_ORIGIN_MTIME, mtime_bl); // save object origin mtime
 
-    struct timespec mtime_ts = real_clock::to_timespec(now);
+    ceph::real_time mtime = real_clock::now();
+    struct timespec mtime_ts = real_clock::to_timespec(mtime);
     new_head_op.mtime2(&mtime_ts);
     // copy first chunk data
-    assert(state->data.length() == state->manifest->get_head_size());
+    if (state->data.length() != state->manifest->get_head_size()){
+        ldpp_dout(dpp, 0) << "ERROR: when copy_head_and_bi_to_trash_bin , head obj len mismatch !, stat->data.len: "
+                          << state->data.length() << " state->manifest->get_head_size(): " << state->manifest->get_head_size() << dendl;
+        return -EIO;
+    }
     new_head_op.write_full(state->data);
 
     r = rgw_rados_operate(dpp, obj_in_trash_ref.pool.ioctx(), obj_in_trash_ref.obj.oid, &new_head_op, null_yield);
@@ -5133,7 +5123,7 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     entry_in_trash_bin.type = BIIndexType::Plain;
     entry_in_trash_bin.idx = rgw_obj_in_trash.key.name;
     dirent.key.name = rgw_obj_in_trash.key.name;
-    dirent.meta.mtime = now;
+    dirent.meta.mtime = mtime;
     dirent.ver.pool = ref.pool.ioctx().get_id();
     dirent.ver.epoch = ref.pool.ioctx().get_last_version();
     encode(dirent, entry_in_trash_bin.data);
@@ -5159,7 +5149,7 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
  * obj: name of the object to delete
  * Returns: 0 on success, -ERR# otherwise.
  */
-int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvider *dpp)// todo :bucket trash compat with bucket sync
+int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvider *dpp)
 {
   RGWRados *store = target->get_store();
   rgw_obj& src_obj = target->get_obj();
@@ -5233,6 +5223,16 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
     }
 
     return 0;
+  }
+
+  if (params.obj_in_bucket_trash_bin){
+      u_int8_t obj_name_len = obj.key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+      if (obj_name_len < 1){
+          ldpp_dout(dpp, 0) << "ERROR: bad trash obj name(" << obj.key.name << ")" << dendl;
+          return -EINVAL;
+      }
+      string orgin_obj_name = obj.key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+      obj.index_hash_source = orgin_obj_name; // trash obj on the shard where origin obj located
   }
 
   rgw_rados_ref ref;
@@ -5323,6 +5323,10 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   RGWRados::Bucket::UpdateIndex index_op(&bop, obj);
   
   index_op.set_zones_trace(params.zones_trace);
+  if(params.del_obj_bypass_trash_bin){
+      // data sync use this flag
+      params.bilog_flags |= RGW_BILOG_FLAG_FORCE_DEL_OP;
+  }
   index_op.set_bilog_flags(params.bilog_flags);
 
   r = index_op.prepare(dpp, CLS_RGW_OP_DEL, &state->write_tag, y);
@@ -5397,16 +5401,9 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
         return -ENOENT;
     }
 
-    rgw_bucket_dir_entry obj_in_trash_dirent;
-    r = store->bi_get_plain(dpp, target->get_bucket_info(), obj_in_trash, &obj_in_trash_dirent);
-    if (r < 0) {
-        ldpp_dout(dpp, 0) << "ERROR: read trash object(" << obj_in_trash.key.name << ") bi entry error, r:" << r << dendl;
-        return r;
-    }
-
     // 2. reconstruct origin object name
     rgw_obj origin_obj = obj_in_trash;
-    // timestamp suffix len is 43, example sizeof(".DELETED_AT_2025-11-11T06:59:35.403942+0000") -1
+    // timestamp suffix len is 43, example sizeof(".CREATED_AT_2025-11-11T06:59:35.403942+0000") -1
     u_int8_t obj_name_len = obj_in_trash.key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
     if (obj_name_len < 1){
         ldpp_dout(dpp, 0) << "ERROR: bad obj name(" << obj_in_trash.key.name << ")" << dendl;
@@ -5419,7 +5416,16 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
     if (r < 0)
         return r;
 
-    // 3. read origin object bucket index entry, check non-existence
+    // 3. read trash obj bucket index entry
+    obj_in_trash.index_hash_source =  origin_obj.key.name; // trash obj on the shard where origin obj located
+    rgw_bucket_dir_entry obj_in_trash_dirent;
+    r = store->bi_get_plain(dpp, target->get_bucket_info(), obj_in_trash, &obj_in_trash_dirent);
+    if (r < 0) {
+        ldpp_dout(dpp, 0) << "ERROR: read trash object(" << obj_in_trash.key.name << ") bi entry error, r:" << r << dendl;
+        return r;
+    }
+
+    // 4. read origin object bucket index entry, check non-existence
     rgw_bucket_dir_entry dirent;
     r = store->bi_get_plain(dpp, target->get_bucket_info(), origin_obj, &dirent);
     if (r < 0 && r != -ENOENT) {
@@ -5432,7 +5438,7 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
         return -EEXIST;
     }
 
-    // 4. restore object (head and bi entry) from trash (may race with concurrent put op)
+    // 5. restore object (head and bi entry) from trash (may race with concurrent put op)
     RGWRados::Bucket bop(target->get_store(), target->get_bucket_info());
     RGWRados::Bucket::UpdateIndex restore_index_op(&bop, origin_obj);
 
@@ -5466,7 +5472,11 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
     restore_op.mtime2(&mtime_ts);
 
     // copy first chunk data
-    assert(state->data.length() == state->manifest->get_head_size());
+    if (state->data.length() != state->manifest->get_head_size()){
+        ldpp_dout(dpp, 0) << "ERROR: when copy_head_and_bi_to_trash_bin , head obj len mismatch !, stat->data.len: "
+                          << state->data.length() << " state->manifest->get_head_size(): " << state->manifest->get_head_size() << dendl;
+        return -EIO;
+    }
     restore_op.write_full(state->data);
 
     r = restore_index_op.prepare(dpp, CLS_RGW_OP_ADD, &origin_write_tag, y);
@@ -5491,7 +5501,7 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
                                   origin_mtime, obj_in_trash_dirent.meta.etag,
                                   obj_in_trash_dirent.meta.content_type, obj_in_trash_dirent.meta.storage_class, &acl_bl,
                                   obj_in_trash_dirent.meta.category, nullptr,
-                                  &obj_in_trash_dirent.meta.user_data, obj_in_trash_dirent.meta.appendable, false);
+                                  &obj_in_trash_dirent.meta.user_data, obj_in_trash_dirent.meta.appendable, false, true/* bilog do not generate here */);
     if (r < 0){
         ldpp_dout(dpp, 0) << "ERROR: obj("<< origin_obj.key.name<<") restore_index_op.complete failed,  returned ret=" << r << dendl;
         int ret = restore_index_op.cancel(dpp, nullptr);
@@ -5501,14 +5511,23 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
         return r;
     }
 
-    // 5. after obj was restored , delete head and bi entry in trash
+    // 6. after obj was restored , delete head and bi entry in trash
     rgw_cls_bi_entry entry_to_del;
     entry_to_del.idx = obj_in_trash.key.name; // use idx to delete
-    r = store->bi_ent_remove(dpp, target->get_bucket_info().bucket, obj_in_trash, entry_to_del);
-    if (r < 0 ) {
+    entry_to_del.type = BIIndexType::Plain;
+
+    obj_in_trash_dirent.meta.mtime = real_clock::now();;
+    obj_in_trash_dirent.ver.pool = obj_in_trash_ref.pool.ioctx().get_id();
+    obj_in_trash_dirent.ver.epoch = obj_in_trash_ref.pool.ioctx().get_last_version();
+
+    encode(obj_in_trash_dirent, entry_to_del.data);
+    // bi_log is necessary for multisite data sync
+    r = store->bi_ent_remove(dpp, target->get_bucket_info().bucket, obj_in_trash, entry_to_del, RGW_BILOG_FLAG_TRASH_RESTORE_OP,
+                             true/* bilog generate here */, params.zones_trace);
+    if (r < 0) {
         if (r != -ENOENT)
             ldpp_dout(dpp, 0) << "ERROR: after restore trash object, error when remove obj(" << obj_in_trash.key.name << ")bi ent from trash , r =" << r << dendl;
-        r = 0; // we can do nothing here but print error log
+        r = 0;
     }
 
     ObjectWriteOperation del_op;
@@ -5517,13 +5536,10 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
     if (r < 0) {
         if (r != -ENOENT)
             ldpp_dout(dpp, 0) << "ERROR: after restore trash object, error when clear object(" << obj_in_trash.key.name << ") head, r =" << r << dendl;
-        r = 0; // we can do nothing here but print error log
+        r = 0;
     }
 
-    if (r <  0)
-        return r;
-
-    return 0;
+    return r;
 }
 
 int RGWRados::delete_obj(const DoutPrefixProvider *dpp,
@@ -6476,7 +6492,7 @@ int RGWRados::Bucket::UpdateIndex::complete(const DoutPrefixProvider *dpp, int64
                                             bufferlist *acl_bl,
                                             RGWObjCategory category,
                                             list<rgw_obj_index_key> *remove_objs, const string *user_data,
-                                            bool appendable, bool update_quota_stats)
+                                            bool appendable, bool update_quota_stats, bool avoid_log_op)
 {
   if (blind) {
     return 0;
@@ -6512,7 +6528,7 @@ int RGWRados::Bucket::UpdateIndex::complete(const DoutPrefixProvider *dpp, int64
   ent.meta.content_type = content_type;
   ent.meta.appendable = appendable;
 
-  ret = store->cls_obj_complete_add(*bs, obj, optag, poolid, epoch, ent, category, remove_objs, bilog_flags, zones_trace, update_quota_stats);
+  ret = store->cls_obj_complete_add(*bs, obj, optag, poolid, epoch, ent, category, remove_objs, bilog_flags, zones_trace, update_quota_stats, avoid_log_op);
 
   int r = store->svc.datalog_rados->add_entry(dpp, target->bucket_info, bs->shard_id);
   if (r < 0) {
@@ -8652,7 +8668,7 @@ int RGWRados::bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj&
   return bi_put(bs, entry);
 }
 
-int RGWRados::bi_ent_remove(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry)
+int RGWRados::bi_ent_remove(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace)
 {
     BucketShard bs(this);
     int ret = bs.init(bucket, obj, nullptr /* no RGWBucketInfo */, dpp);
@@ -8662,7 +8678,7 @@ int RGWRados::bi_ent_remove(const DoutPrefixProvider *dpp, rgw_bucket& bucket, r
     }
 
     auto& ref = bs.bucket_obj.get_ref();
-    ret = cls_rgw_bi_ent_remove(ref.pool.ioctx(), ref.obj.oid, entry);
+    ret = cls_rgw_bi_ent_remove(ref.pool.ioctx(), ref.obj.oid, entry, bilog_flag, log_op, zones_trace);
     if (ret < 0)
         return ret;
 
@@ -8801,7 +8817,7 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
                                   int64_t pool, uint64_t epoch,
                                   rgw_bucket_dir_entry& ent, RGWObjCategory category,
 				  list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
-                  rgw_zone_set *_zones_trace, bool update_quota_stats)
+                  rgw_zone_set *_zones_trace, bool update_quota_stats, bool avoid_log_op)
 {
   ObjectWriteOperation o;
   o.assert_exists(); // bucket index shard must exist
@@ -8821,11 +8837,15 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
   ver.epoch = epoch;
   cls_rgw_obj_key key(ent.key.name, ent.key.instance);
   cls_rgw_guard_bucket_resharding(o, -ERR_BUSY_RESHARDING);
+  bool log_op = svc.zone->get_zone().log_data;
+  if (avoid_log_op){
+      log_op = false;
+  }
   cls_rgw_bucket_complete_op(o, op, tag, ver, key, dir_meta, remove_objs,
-                             svc.zone->get_zone().log_data, bilog_flags, &zones_trace, update_quota_stats);
+                             log_op, bilog_flags, &zones_trace, update_quota_stats);
   complete_op_data *arg;
   index_completion_manager->create_completion(obj, op, tag, ver, key, dir_meta, remove_objs,
-                                              svc.zone->get_zone().log_data, bilog_flags, &zones_trace, update_quota_stats, &arg);
+                                              log_op, bilog_flags, &zones_trace, update_quota_stats, &arg);
   librados::AioCompletion *completion = arg->rados_completion;
   int ret = bs.bucket_obj.aio_operate(arg->rados_completion, &o);
   completion->release(); /* can't reference arg here, as it might have already been released */
@@ -8835,9 +8855,9 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
 int RGWRados::cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag,
                                    int64_t pool, uint64_t epoch,
                                    rgw_bucket_dir_entry& ent, RGWObjCategory category,
-                                   list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace, bool update_quota_stats)
+                                   list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace, bool update_quota_stats, bool avoid_log_op)
 {
-  return cls_obj_complete_op(bs, obj, CLS_RGW_OP_ADD, tag, pool, epoch, ent, category, remove_objs, bilog_flags, zones_trace, update_quota_stats);
+  return cls_obj_complete_op(bs, obj, CLS_RGW_OP_ADD, tag, pool, epoch, ent, category, remove_objs, bilog_flags, zones_trace, update_quota_stats, avoid_log_op);
 }
 
 int RGWRados::cls_obj_complete_del(BucketShard& bs, string& tag,

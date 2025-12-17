@@ -1180,6 +1180,7 @@ class RGWAsyncRemoveObj : public RGWAsyncRadosRequest {
   bool del_if_older;
   ceph::real_time timestamp;
   rgw_zone_set zones_trace;
+  uint16_t bilog_flags;
 
 protected:
   int _send_request(const DoutPrefixProvider *dpp) override;
@@ -1196,7 +1197,8 @@ public:
                          bool _delete_marker,
                          bool _if_older,
                          real_time& _timestamp,
-                         rgw_zone_set* _zones_trace) : RGWAsyncRadosRequest(caller, cn), dpp(_dpp), store(_store),
+                         rgw_zone_set* _zones_trace,
+                         uint16_t bilog_flags) : RGWAsyncRadosRequest(caller, cn), dpp(_dpp), store(_store),
                                                       source_zone(_source_zone),
                                                       bucket_info(_bucket_info),
                                                       key(_key),
@@ -1205,7 +1207,8 @@ public:
                                                       versioned(_versioned),
                                                       versioned_epoch(_versioned_epoch),
                                                       del_if_older(_if_older),
-                                                      timestamp(_timestamp) {
+                                                      timestamp(_timestamp),
+                                                     bilog_flags(bilog_flags){
     if (_delete_marker) {
       marker_version_id = key.instance;
     }
@@ -1239,6 +1242,8 @@ class RGWRemoveObjCR : public RGWSimpleCoroutine {
   
   rgw_zone_set *zones_trace;
 
+  uint16_t bilog_flags;
+
 public:
   RGWRemoveObjCR(const DoutPrefixProvider *_dpp, RGWAsyncRadosProcessor *_async_rados, rgw::sal::RGWRadosStore *_store,
                       const rgw_zone_id& _source_zone,
@@ -1250,14 +1255,15 @@ public:
                       string *_owner_display_name,
                       bool _delete_marker,
                       real_time *_timestamp,
-                      rgw_zone_set *_zones_trace) : RGWSimpleCoroutine(_store->ctx()), dpp(_dpp), cct(_store->ctx()),
+                      rgw_zone_set *_zones_trace,
+                      uint16_t bilog_flags = 0) : RGWSimpleCoroutine(_store->ctx()), dpp(_dpp), cct(_store->ctx()),
                                        async_rados(_async_rados), store(_store),
                                        source_zone(_source_zone),
                                        bucket_info(_bucket_info),
                                        key(_key),
                                        versioned(_versioned),
                                        versioned_epoch(_versioned_epoch),
-                                       delete_marker(_delete_marker), req(NULL), zones_trace(_zones_trace) {
+                                       delete_marker(_delete_marker), req(NULL), zones_trace(_zones_trace), bilog_flags(bilog_flags) {
     del_if_older = (_timestamp != NULL);
     if (_timestamp) {
       timestamp = *_timestamp;
@@ -1285,7 +1291,7 @@ public:
   int send_request(const DoutPrefixProvider *dpp) override {
     req = new RGWAsyncRemoveObj(dpp, this, stack->create_completion_notifier(), store, source_zone, bucket_info,
                                 key, owner, owner_display_name, versioned, versioned_epoch,
-                                delete_marker, del_if_older, timestamp, zones_trace);
+                                delete_marker, del_if_older, timestamp, zones_trace, bilog_flags);
     async_rados->queue(req);
     return 0;
   }

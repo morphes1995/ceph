@@ -840,6 +840,7 @@ protected:
   string delimiter;
   string encoding_type;
   bool list_versions;
+  bool show_trash;
   int max;
   vector<rgw_bucket_dir_entry> objs;
   map<string, bool> common_prefixes;
@@ -855,7 +856,7 @@ protected:
 public:
   RGWListBucket() : list_versions(false), max(0),
                     default_max(0), is_truncated(false),
-		    allow_unordered(false), shard_id(-1) {}
+		    allow_unordered(false), shard_id(-1), show_trash(false){}
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
