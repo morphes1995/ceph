@@ -1082,6 +1082,10 @@ int RGWBucket::set_trash(RGWBucketAdminOpState &op_state, const DoutPrefixProvid
     }
 
     if (op_state.trash_enabled) {
+        if (bucket_info.versioned()){
+            set_err_msg(err_msg, "could not enable trash bin, because of bucket was versioned!");
+            return -EINVAL;
+        }
         bucket_info.flags = bucket_info.flags | BUCKET_TRASH_ENABLED;
     } else {
         bucket_info.trash_obj_expired_days = 0; // reset to 0

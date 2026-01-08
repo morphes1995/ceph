@@ -2596,7 +2596,7 @@ static int rgw_bi_ent_remove_op(cls_method_context_t hctx, bufferlist *in, buffe
 {
     CLS_LOG(10, "entered %s()\n", __func__);
     // decode request
-    rgw_cls_bi_remove_op op; // we reuse put op
+    rgw_cls_bi_remove_op op;
     auto iter = in->cbegin();
     try {
         decode(op, iter);

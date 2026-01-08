@@ -3209,9 +3209,9 @@ int RGWDeleteObj_ObjStore_S3::get_params(optional_yield y)
       ldpp_dout(this, 0) << "ERROR: concurrence of restore from trash param and force delete param is invalid! " << dendl;
       return -EINVAL;
   }
-  if (del_obj_bypass_trash_bin || restore_obj_from_trash_bin){
+  if (restore_obj_from_trash_bin){
       if (!s->bucket->get_info().trash_bin_enabled()){
-          ldpp_dout(this, 0) << "ERROR: restore from trash/force delete param are invalid when bucket trash bin is disabled! " << dendl;
+          ldpp_dout(this, 0) << "ERROR: restore from trash bin param are invalid when bucket trash bin is disabled! " << dendl;
           return -EINVAL;
       }
   }
@@ -3933,9 +3933,9 @@ int RGWDeleteMultiObj_ObjStore_S3::get_params(optional_yield y)
       return -EINVAL;
   }
 
-  if (del_obj_bypass_trash_bin || restore_obj_from_trash_bin){
+  if (restore_obj_from_trash_bin){
       if (!s->bucket->get_info().trash_bin_enabled()){
-          ldpp_dout(this, 0) << "ERROR: restore from trash/force delete param are invalid when bucket trash bin is disabled! " << dendl;
+          ldpp_dout(this, 0) << "ERROR: restore from trash bin  param are invalid when bucket trash bin is disabled! " << dendl;
           return -EINVAL;
       }
   }
