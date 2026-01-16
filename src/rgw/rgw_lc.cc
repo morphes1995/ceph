@@ -1483,6 +1483,10 @@ int RGWLC::bucket_lc_process(string& shard_id, LCWorker* worker,
   }
 
   if (result.size() == 4 && result[3] == ".trash"){
+      if (store->svc()->zone->get_zonegroup().master_zone.id != store->svc()->zone->zone_id().id){
+           ldpp_dout(this, 10) << __func__ <<  "() ,only master zone can execute the trash bin used lc rule:  "<< shard_id << dendl;
+           return 0;
+      }
       if (bucket->get_info().trash_bin_enabled()){
           int days = bucket->get_info().trash_obj_expired_days;
           if (days > 0){
