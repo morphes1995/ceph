@@ -910,6 +910,7 @@ public:
       int delete_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int restore_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
+      bool origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_raw_obj &raw_obj, optional_yield y);
     };
 
     struct Stat {

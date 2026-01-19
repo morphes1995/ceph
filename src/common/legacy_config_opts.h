@@ -1586,3 +1586,5 @@ OPTION(rgw_gc_max_deferred, OPT_U64) // GC max number of deferred entries
 
 OPTION(rgw_debug_inject_set_olh_err, OPT_U64) // dev option to inject an error in set_olh
 OPTION(rgw_debug_inject_olh_cancel_modification_err, OPT_BOOL) // dev option to simulate olh cancel modification error
+OPTION(rgw_trash_debug_inject_remove_origin_obj_err, OPT_U64) // dev option to simulate the scenario of error when remove origin obj after new head and bi entry created in trash bin
+OPTION(rgw_trash_debug_inject_error_after_obj_restore, OPT_U64) // dev option to simulate the scenario of error when origin obj restored successfully but remove head in trash failed

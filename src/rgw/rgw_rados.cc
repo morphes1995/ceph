@@ -5116,7 +5116,7 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     r = rgw_rados_operate(dpp, obj_in_trash_ref.pool.ioctx(), obj_in_trash_ref.obj.oid, &new_head_op, null_yield);
     if (r < 0) {
         ldpp_dout(dpp, 0) << "ERROR: failed to create new head obj (" << obj_in_trash_ref.obj.oid << ") in trash bin. r:" << r << dendl;
-        return r;
+        return -EIO;
     }
 
     rgw_cls_bi_entry entry_in_trash_bin;
@@ -5316,6 +5316,24 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
               return r;
       }
   }
+  if (params.obj_in_bucket_trash_bin){
+      u_int8_t obj_name_len = obj.key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+      if (obj_name_len < 1){
+          ldpp_dout(dpp, 0) << "ERROR: bad trash bin obj name(" << obj.key.name << ")" << dendl;
+          return -EINVAL;
+      }
+      rgw_obj& origin_obj = target->get_obj();
+      origin_obj.key.name = obj.key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+      rgw_raw_obj raw_obj;
+      store->obj_to_raw(target->bucket_info.placement_rule, origin_obj, &raw_obj);
+      // check if the corresponding origin obj exist, if so tail objs should keep
+      if (origin_obj_existence_check(dpp, raw_obj, y)) {
+          update_quota_stats = false;
+          target->state->keep_tail = true;
+          ldpp_dout(dpp, 0) << "WARNING: when deleting obj(" << obj.key.name << ")"
+                            << ", found it's origin obj("<<origin_obj.key.name<<") exists, keep the tail objects to avoid data loss"<<dendl;
+      }
+  }
 
   RGWBucketInfo& bucket_info = target->get_bucket_info();
 
@@ -5336,7 +5354,12 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   store->remove_rgw_head_obj(op);
 
   auto& ioctx = ref.pool.ioctx();
-  r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, y);
+  if (params.bucket_trash_bin_enabled && store->ctx()->_conf->rgw_trash_debug_inject_remove_origin_obj_err) {
+      // fail here to simulate the scenario of error when remove origin obj after new head and bi entry created in trash bin
+      r = -store->ctx()->_conf->rgw_trash_debug_inject_remove_origin_obj_err;
+  }else{
+      r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, y);
+  }
 
   /* raced with another operation, object state is indeterminate */
   const bool need_invalidate = (r == -ECANCELED);
@@ -5375,6 +5398,31 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   }
 
   return 0;
+}
+
+bool RGWRados::Object::Delete::origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_raw_obj &raw_obj,
+                                                          optional_yield y) {
+    map<string, bufferlist> origin_obj_attrset;
+    int fetch_origin_obj_res = target->get_store()->RGWRados::raw_obj_stat(dpp, raw_obj, NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL, y);
+    if (fetch_origin_obj_res >= 0 ){
+        bufferlist id_tag_bl;
+        if (target->state->get_attr(RGW_ATTR_ID_TAG, id_tag_bl) &&
+                origin_obj_attrset.find(RGW_ATTR_ID_TAG) != origin_obj_attrset.end()){
+            if (strncmp(origin_obj_attrset[RGW_ATTR_ID_TAG].c_str(), id_tag_bl.c_str(), id_tag_bl.length()) == 0) {
+                return true;
+            }
+        }
+
+        bufferlist etag_bl;
+        if (target->state->get_attr(RGW_ATTR_ETAG, etag_bl) &&
+            origin_obj_attrset.find(RGW_ATTR_ETAG) != origin_obj_attrset.end()){
+            if (strncmp(origin_obj_attrset[RGW_ATTR_ETAG].c_str(), etag_bl.c_str(), etag_bl.length()) == 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -5512,6 +5560,18 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
     }
 
     // 6. after obj was restored , delete head and bi entry in trash
+    ObjectWriteOperation del_op;
+    store->remove_rgw_head_obj(del_op);
+    if (params.bucket_trash_bin_enabled && store->ctx()->_conf->rgw_trash_debug_inject_error_after_obj_restore) {
+        r = -store->ctx()->_conf->rgw_trash_debug_inject_error_after_obj_restore;
+    }else{
+        r = rgw_rados_operate(dpp, ioctx, obj_in_trash_ref.obj.oid, &del_op, y);
+    }
+    if (r < 0 && r != -ENOENT) {
+        ldpp_dout(dpp, 0) << "ERROR: after restore trash object, error when clear object(" << obj_in_trash.key.name << ") head, r =" << r << dendl;
+        return r;
+    }
+
     rgw_cls_bi_entry entry_to_del;
     entry_to_del.idx = obj_in_trash.key.name; // use idx to delete
     entry_to_del.type = BIIndexType::Plain;
@@ -5524,19 +5584,9 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
     // bi_log is necessary for multisite data sync
     r = store->bi_ent_remove(dpp, target->get_bucket_info().bucket, obj_in_trash, entry_to_del, RGW_BILOG_FLAG_TRASH_RESTORE_OP,
                              true/* bilog generate here */, params.zones_trace);
-    if (r < 0) {
-        if (r != -ENOENT)
-            ldpp_dout(dpp, 0) << "ERROR: after restore trash object, error when remove obj(" << obj_in_trash.key.name << ")bi ent from trash , r =" << r << dendl;
-        r = 0;
-    }
-
-    ObjectWriteOperation del_op;
-    store->remove_rgw_head_obj(del_op);
-    r = rgw_rados_operate(dpp, ioctx, obj_in_trash_ref.obj.oid, &del_op, y);
-    if (r < 0) {
-        if (r != -ENOENT)
-            ldpp_dout(dpp, 0) << "ERROR: after restore trash object, error when clear object(" << obj_in_trash.key.name << ") head, r =" << r << dendl;
-        r = 0;
+    if (r < 0 && r != -ENOENT) {
+        ldpp_dout(dpp, 0) << "ERROR: after restore trash object, error when remove obj(" << obj_in_trash.key.name << ")bi ent from trash , r =" << r << dendl;
+        return r;
     }
 
     return r;

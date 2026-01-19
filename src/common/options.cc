@@ -7176,6 +7176,15 @@ std::vector<Option> get_rgw_options() {
         "entries aren't cleaned up by the request thread after an error scenario.")
     .add_service("rgw"),
 
+    Option("rgw_trash_debug_inject_remove_origin_obj_err", Option::TYPE_UINT, Option::LEVEL_DEV)
+            .set_default(0)
+            .set_description(" simulate the scenario of error when remove origin obj after new head and bi entry created in trash bin")
+            .add_service("rgw"),
+    Option("rgw_trash_debug_inject_error_after_obj_restore", Option::TYPE_UINT, Option::LEVEL_DEV)
+            .set_default(0)
+            .set_description("simulate the scenario of error when origin obj restored successfully but remove head in trash failed")
+            .add_service("rgw"),
+
     Option("rgw_debug_inject_olh_cancel_modification_err", Option::TYPE_BOOL, Option::LEVEL_DEV)
     .set_default(false)
     .set_description("Whether to inject an error to simulate a failure to cancel olh "
