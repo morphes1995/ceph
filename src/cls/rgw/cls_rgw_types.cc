@@ -136,6 +136,11 @@ void rgw_bucket_dir_entry_meta::dump(Formatter *f) const
   encode_json("accounted_size", accounted_size, f);
   encode_json("user_data", user_data, f);
   encode_json("appendable", appendable, f);
+
+  encode_json("inline_head", inline_head, f);
+  int  head_data_size = head_data.length();
+  encode_json("head_data_size", head_data_size, f);
+  encode_json("head_attrs", head_attrs, f);
 }
 
 void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
@@ -154,6 +159,11 @@ void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("accounted_size", accounted_size, obj);
   JSONDecoder::decode_json("user_data", user_data, obj);
   JSONDecoder::decode_json("appendable", appendable, obj);
+
+  JSONDecoder::decode_json("inline_head", inline_head, obj);
+  int  head_data_size = head_data.length();
+  JSONDecoder::decode_json("head_data_size", head_data_size, obj);
+  JSONDecoder::decode_json("head_attrs", head_attrs, obj);
 }
 
 void rgw_bucket_dir_entry::generate_test_instances(list<rgw_bucket_dir_entry*>& o)

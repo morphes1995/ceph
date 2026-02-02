@@ -861,6 +861,11 @@ int RGWRadosObject::RadosWriteOp::write_meta(const DoutPrefixProvider *dpp, uint
   return ret;
 }
 
+int RGWRadosObject::RadosWriteOp::write_meta_tiny_obj(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size, optional_yield y)
+{
+    return parent_op.write_meta_tiny_obj(dpp, size, accounted_size, *params.attrs, y);
+}
+
 int RGWRadosObject::swift_versioning_restore(RGWObjectCtx* obj_ctx,
 					     bool& restored,
 					     const DoutPrefixProvider *dpp)

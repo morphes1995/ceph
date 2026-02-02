@@ -94,6 +94,7 @@ int rgw_process_authenticated(RGWHandler_REST * const handler,
 			      optional_yield y,
                               const bool skip_retarget)
 {
+  auto before_rgw_process_authenticated = ceph::coarse_real_clock::now();
   ldpp_dout(op, 2) << "init permissions" << dendl;
   int ret = handler->init_permissions(op, y);
   if (ret < 0) {
@@ -168,6 +169,9 @@ int rgw_process_authenticated(RGWHandler_REST * const handler,
 
   ldpp_dout(op, 2) << "completing" << dendl;
   op->complete();
+
+  auto after_rgw_process_authenticated = ceph::coarse_real_clock::now();
+  ldpp_dout(op, 20) << "rgw_process_authenticated time taken: "<< (after_rgw_process_authenticated - before_rgw_process_authenticated) << dendl;
 
   return 0;
 }

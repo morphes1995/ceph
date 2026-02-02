@@ -734,7 +734,7 @@ public:
     int get_state(const DoutPrefixProvider *dpp, RGWObjState **pstate, bool follow_olh, optional_yield y, bool assume_noent = false);
     void invalidate_state();
 
-    int prepare_atomic_modification(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op, bool reset_obj, const string *ptag,
+    int     prepare_atomic_modification(const DoutPrefixProvider *dpp, librados::ObjectWriteOperation& op, bool reset_obj, const string *ptag,
                                     const char *ifmatch, const char *ifnomatch, bool removal_op, bool modify_tail, optional_yield y);
     int complete_atomic_modification(const DoutPrefixProvider *dpp);
 
@@ -863,6 +863,8 @@ public:
                      bool modify_tail, bool assume_noent,
                      void *index_op, optional_yield y);
       int write_meta(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size,
+                     map<std::string, bufferlist>& attrs, optional_yield y);
+      int write_meta_tiny_obj(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size,
                      map<std::string, bufferlist>& attrs, optional_yield y);
       int write_data(const char *data, uint64_t ofs, uint64_t len, bool exclusive);
       const req_state* get_req_state() {
@@ -1034,6 +1036,76 @@ public:
 
       bool is_prepared() { return prepared; }
     }; // class UpdateIndex
+
+    class UpdateIndexAtomic {
+      RGWRados::Bucket *target;
+      string optag;
+      rgw_obj obj;
+      uint16_t bilog_flags{0};
+      BucketShard bs;
+      bool bs_initialized{false};
+      rgw_zone_set *zones_trace{nullptr};
+
+      std::map<string, string> cmp_eq_xattrs;
+      // inline head data
+      bufferlist head_data;
+      std::map<string, bufferlist> head_attrs;
+
+
+      int init_bs(const DoutPrefixProvider *dpp) {
+        int r =bs.init(target->get_bucket(), obj, nullptr /* no RGWBucketInfo */, dpp);
+        if (r < 0) {
+          return r;
+        }
+        bs_initialized = true;
+        return 0;
+      }
+
+      int guard_reshard(const DoutPrefixProvider *dpp, BucketShard **pbs, std::function<int(BucketShard *)> call);
+    public:
+
+      UpdateIndexAtomic(RGWRados::Bucket *_target, const rgw_obj& _obj) : target(_target), obj(_obj),
+                                                                    bs(target->get_store()) {}
+
+      int get_bucket_shard(BucketShard **pbs, const DoutPrefixProvider *dpp) {
+        if (!bs_initialized) {
+          int r = init_bs(dpp);
+          if (r < 0) {
+            return r;
+          }
+        }
+        *pbs = &bs;
+        return 0;
+      }
+
+      void set_bilog_flags(uint16_t flags) {
+        bilog_flags = flags;
+      }
+
+      void set_zones_trace(rgw_zone_set *_zones_trace) {
+        zones_trace = _zones_trace;
+      }
+
+      int complete_atomic(const DoutPrefixProvider *dpp, uint64_t size,
+                   uint64_t accounted_size, ceph::real_time& ut,
+                   const string& etag, const string& content_type,
+                   const string& storage_class,
+                   bufferlist *acl_bl, RGWObjCategory category,
+                   list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false);
+
+      void set_head_attr(const string &name, const bufferlist& v){
+        head_attrs.emplace(name, v);
+      }
+      void set_cmp_eq_xattrs(const string &name, const string& v){
+        cmp_eq_xattrs.emplace(name, v);
+      }
+      void set_head_data(const bufferlist& v){
+        head_data = v;
+      }
+      void set_op_tag(const string &tag){
+        optag = tag;
+      }
+    }; // class UpdateIndexAtomic
 
     class List {
     protected:
@@ -1443,6 +1515,11 @@ public:
   int cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModifyOp op, string& tag, int64_t pool, uint64_t epoch,
                           rgw_bucket_dir_entry& ent, RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                           rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);
+  int cls_obj_complete_add_op_atomic(BucketShard& bs, const rgw_obj& obj, string& tag,
+                                     rgw_bucket_dir_entry& ent, RGWObjCategory category,
+                                     list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
+                                     std::map<string, string> &cmp_eq_xattrs,
+                                     rgw_zone_set *_zones_trace = nullptr);
   int cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag, int64_t pool, uint64_t epoch, rgw_bucket_dir_entry& ent,
                            RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);
