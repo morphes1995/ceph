@@ -22,6 +22,7 @@ constexpr int RGWBIAdvanceAndRetryError = -EFBIG;
 #define RGW_BUCKET_UPDATE_STATS "bucket_update_stats"
 #define RGW_BUCKET_PREPARE_OP "bucket_prepare_op"
 #define RGW_BUCKET_COMPLETE_OP "bucket_complete_op"
+#define RGW_BUCKET_COMPLETE_ATOMIC_OP "bucket_complete_atomic_op"
 #define RGW_BUCKET_LINK_OLH "bucket_link_olh"
 #define RGW_BUCKET_UNLINK_INSTANCE "bucket_unlink_instance"
 #define RGW_BUCKET_READ_OLH_LOG "bucket_read_olh_log"

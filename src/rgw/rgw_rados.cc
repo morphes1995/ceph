@@ -3189,18 +3189,26 @@ int RGWRados::Object::Write::_do_write_meta(const DoutPrefixProvider *dpp,
   }
 
   if (!index_op->is_prepared()) {
+    auto before_put_op_bi_prepare = ceph::coarse_real_clock::now();
     tracepoint(rgw_rados, prepare_enter, req_id.c_str());
     r = index_op->prepare(dpp, CLS_RGW_OP_ADD, &state->write_tag, y);
     tracepoint(rgw_rados, prepare_exit, req_id.c_str());
+    auto after_put_op_bi_prepare = ceph::coarse_real_clock::now();
+    ldpp_dout(dpp, 20) << "put op bi prepare time taken: "<< (after_put_op_bi_prepare - before_put_op_bi_prepare) << dendl;
     if (r < 0)
       return r;
   }
 
   auto& ioctx = ref.pool.ioctx();
-
+  auto before_put_op_write_head = ceph::coarse_real_clock::now();
   tracepoint(rgw_rados, operate_enter, req_id.c_str());
   r = rgw_rados_operate(dpp, ref.pool.ioctx(), ref.obj.oid, &op, null_yield);
   tracepoint(rgw_rados, operate_exit, req_id.c_str());
+  auto after_put_op_write_head = ceph::coarse_real_clock::now();
+  ldpp_dout(dpp, 20) << "put op write head time taken: " << (after_put_op_write_head - before_put_op_write_head)
+                    << " oid:" << ref.obj.oid << " res: "<< r << " assume_noent " << assume_noent <<dendl;
+  std::chrono::time_point<coarse_real_clock> before_put_op_bi_complete;
+  std::chrono::time_point<coarse_real_clock> after_put_op_bi_complete;
   if (r < 0) { /* we can expect to get -ECANCELED if object was replaced under,
                 or -ENOENT if was removed, or -EEXIST if it did not exist
                 before and now it does */
@@ -3219,12 +3227,15 @@ int RGWRados::Object::Write::_do_write_meta(const DoutPrefixProvider *dpp,
     ldpp_dout(dpp, 0) << "ERROR: complete_atomic_modification returned r=" << r << dendl;
   }
 
+  before_put_op_bi_complete = ceph::coarse_real_clock::now();
   tracepoint(rgw_rados, complete_enter, req_id.c_str());
   r = index_op->complete(dpp, poolid, epoch, size, accounted_size,
                         meta.set_mtime, etag, content_type,
                         storage_class, &acl_bl,
                         meta.category, meta.remove_objs, meta.user_data, meta.appendable);
   tracepoint(rgw_rados, complete_exit, req_id.c_str());
+  after_put_op_bi_complete = ceph::coarse_real_clock::now();
+  ldpp_dout(dpp, 20) << "put op bi complete time taken: "<< (after_put_op_bi_complete - before_put_op_bi_complete) << dendl;
   if (r < 0)
     goto done_cancel;
 
@@ -3333,6 +3344,215 @@ int RGWRados::Object::Write::write_meta(const DoutPrefixProvider *dpp, uint64_t 
     r = _do_write_meta(dpp, size, accounted_size, attrs, assume_noent, meta.modify_tail, (void *)&index_op, y);
   }
   return r;
+}
+
+int RGWRados::Object::Write::write_meta_tiny_obj(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size,
+                        map<std::string, bufferlist>& attrs, optional_yield y)
+{
+    if (target->get_bucket_info().layout.current_index.layout.type == rgw::BucketIndexType::Indexless){
+      ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): cannot write tiny object in blind bucket" << dendl;
+      return -EINVAL;
+    }
+
+    RGWBucketInfo& bucket_info = target->get_bucket_info();
+    RGWRados::Bucket bop(target->get_store(), bucket_info);
+    RGWRados::Bucket::UpdateIndexAtomic index_op(&bop, target->get_obj());
+    index_op.set_zones_trace(meta.zones_trace);
+    RGWRados *store = target->get_store();
+    RGWObjState *state;
+    int r = target->get_state(dpp, &state, false, y, false);
+    if (r < 0)
+        return r;
+
+    rgw_obj& obj = target->get_obj();
+
+    if (obj.get_oid().empty()) {
+        ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): cannot write object with empty name" << dendl;
+        return -EIO;
+    }
+
+    bool is_olh = state->is_olh;
+    bool reset_obj = (meta.flags & PUT_OBJ_CREATE) != 0;
+
+    const string *ptag = meta.ptag;
+
+    bool need_guard = ((state->manifest) || (state->obj_tag.length() != 0) ||  meta.if_match != NULL || meta.if_nomatch != NULL)
+                    && (!state->fake_tag);
+    if (need_guard) {
+      /* first verify that the object wasn't replaced under */
+      if (meta.if_nomatch == NULL || strcmp(meta.if_nomatch, "*") != 0) {
+        // new head obj create only obj_tag match with old one
+        index_op.set_cmp_eq_xattrs(RGW_ATTR_ID_TAG, state->obj_tag.c_str());
+      }
+
+      if (meta.if_match) {
+        if (strcmp(meta.if_match, "*") == 0) {
+          // test the object is existing
+          if (!state->exists) {
+            return -ERR_PRECONDITION_FAILED;
+          }
+        } else {
+          bufferlist bl;
+          if (!state->get_attr(RGW_ATTR_ETAG, bl) ||
+              strncmp(meta.if_match, bl.c_str(), bl.length()) != 0) {
+            return -ERR_PRECONDITION_FAILED;
+          }
+        }
+      }
+
+      if (meta.if_nomatch) {
+        if (strcmp(meta.if_nomatch, "*") == 0) {
+          // test the object is NOT existing
+          if (state->exists) {
+            return -ERR_PRECONDITION_FAILED;
+          }
+        } else {
+          bufferlist bl;
+          if (!state->get_attr(RGW_ATTR_ETAG, bl) ||
+              strncmp(meta.if_nomatch, bl.c_str(), bl.length()) == 0) {
+            return -ERR_PRECONDITION_FAILED;
+          }
+        }
+      }
+    }
+
+    if (ptag) {
+      state->write_tag = *ptag;
+    } else {
+      append_rand_alpha(store->ctx(), state->write_tag, state->write_tag, 32);
+    }
+    index_op.set_op_tag(*ptag);
+
+    bufferlist tag_bl;
+    tag_bl.append(state->write_tag.c_str(), state->write_tag.size() + 1);
+    ldpp_dout(dpp, 10) << "setting object write_tag=" << state->write_tag << dendl;
+
+    index_op.set_head_attr(RGW_ATTR_ID_TAG, tag_bl);
+    if (meta.modify_tail) {
+      index_op.set_head_attr(RGW_ATTR_TAIL_TAG, tag_bl);
+    }
+
+    if (real_clock::is_zero(meta.set_mtime)) {
+        meta.set_mtime = real_clock::now();
+    }
+
+    if (target->bucket_info.obj_lock_enabled() && target->bucket_info.obj_lock.has_rule() && meta.flags == PUT_OBJ_CREATE) {
+        auto iter = attrs.find(RGW_ATTR_OBJECT_RETENTION);
+        if (iter == attrs.end()) {
+            real_time lock_until_date = target->bucket_info.obj_lock.get_lock_until_date(meta.set_mtime);
+            string mode = target->bucket_info.obj_lock.get_mode();
+            RGWObjectRetention obj_retention(mode, lock_until_date);
+            bufferlist bl;
+            obj_retention.encode(bl);
+            index_op.set_head_attr(RGW_ATTR_OBJECT_RETENTION, bl);
+        }
+    }
+
+    if (meta.data) {
+        index_op.set_head_data(*meta.data);
+    }
+
+    string etag;
+    string content_type;
+    bufferlist acl_bl;
+    string storage_class;
+
+    map<string, bufferlist>::iterator iter;
+    if (meta.manifest) {
+        storage_class = meta.manifest->get_tail_placement().placement_rule.storage_class;
+        /* remove existing manifest attr */
+        iter = attrs.find(RGW_ATTR_MANIFEST);
+        if (iter != attrs.end())
+            attrs.erase(iter);
+
+        bufferlist bl;
+        encode(*meta.manifest, bl);
+        index_op.set_head_attr(RGW_ATTR_MANIFEST, bl);
+    }
+
+    for (iter = attrs.begin(); iter != attrs.end(); ++iter) {
+        const string& name = iter->first;
+        bufferlist& bl = iter->second;
+
+        if (!bl.length())
+            continue;
+
+        index_op.set_head_attr(name.c_str(), bl);
+        if (name.compare(RGW_ATTR_ETAG) == 0) {
+            etag = rgw_bl_str(bl);
+        } else if (name.compare(RGW_ATTR_CONTENT_TYPE) == 0) {
+            content_type = rgw_bl_str(bl);
+        } else if (name.compare(RGW_ATTR_ACL) == 0) {
+            acl_bl = bl;
+        }
+    }
+//    if (attrs.find(RGW_ATTR_PG_VER) == attrs.end()) {
+//      // write to shard obj omap, pg version is currently unknown
+//    }
+
+    if (attrs.find(RGW_ATTR_SOURCE_ZONE) == attrs.end()) {
+        bufferlist bl;
+        encode(store->svc.zone->get_zone_short_id(), bl);
+        index_op.set_head_attr(RGW_ATTR_SOURCE_ZONE, bl);
+    }
+
+    if (!storage_class.empty()) {
+        bufferlist bl;
+        bl.append(storage_class);
+        index_op.set_head_attr(RGW_ATTR_STORAGE_CLASS, bl);
+    }
+
+    bool orig_exists;
+    uint64_t orig_size;
+
+    if (!reset_obj) {    //Multipart upload, it has immutable head.
+        orig_exists = false;
+        orig_size = 0;
+    } else {
+        orig_exists = state->exists;
+        orig_size = state->accounted_size;
+    }
+    auto before_complete_atomic = ceph::coarse_real_clock::now();
+    r = index_op.complete_atomic(dpp, size, accounted_size,
+                           meta.set_mtime, etag, content_type,
+                           storage_class, &acl_bl,
+                           meta.category, meta.remove_objs, meta.user_data, meta.appendable);
+    auto after_complete_atomic = ceph::coarse_real_clock::now();
+    ldpp_dout(dpp, 20) << "complete atomic time taken: "<< (after_complete_atomic - before_complete_atomic) << dendl;
+    if (r < 0)
+      return r;
+
+    if (meta.mtime) {
+      *meta.mtime = meta.set_mtime;
+    }
+
+    /* note that index_op was using state so we couldn't invalidate it earlier */
+    target->invalidate_state();
+    state = NULL;
+
+    if (!real_clock::is_zero(meta.delete_at)) {
+        rgw_obj_index_key obj_key;
+        obj.key.get_index_key(&obj_key);
+
+        r = store->obj_expirer->hint_add(dpp, meta.delete_at, obj.bucket.tenant, obj.bucket.name,
+                                         obj.bucket.bucket_id, obj_key);
+        if (r < 0) {
+            ldpp_dout(dpp, 0) << "ERROR: objexp_hint_add() returned r=" << r << ", object will not get removed" << dendl;
+            /* ignoring error, nothing we can do at this point */
+        }
+    }
+    meta.canceled = false;
+
+    /* update quota cache */
+    if (meta.completeMultipart){
+        store->quota_handler->update_stats(meta.owner, obj.bucket, (orig_exists ? 0 : 1),
+                                           0, orig_size);
+    }
+    else {
+        store->quota_handler->update_stats(meta.owner, obj.bucket, (orig_exists ? 0 : 1),
+                                           accounted_size, orig_size);
+    }
+    return 0;
 }
 
 class RGWRadosPutObj : public RGWHTTPStreamRWRequest::ReceiveCB
@@ -6642,6 +6862,64 @@ int RGWRados::Bucket::UpdateIndex::cancel(const DoutPrefixProvider *dpp,
   return ret;
 }
 
+
+int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic(const DoutPrefixProvider *dpp, uint64_t size,
+                                                         uint64_t accounted_size, ceph::real_time& ut,
+                                                         const string& etag, const string& content_type,
+                                                         const string& storage_class,
+                                                         bufferlist *acl_bl, RGWObjCategory category,
+                                                         list<rgw_obj_index_key> *remove_objs, const string *user_data, bool appendable)
+{
+  RGWRados *store = target->get_store();
+  BucketShard *bs;
+
+  int ret = get_bucket_shard(&bs, dpp);
+  if (ret < 0) {
+    ldpp_dout(dpp, 5) << "failed to get BucketShard object: ret=" << ret << dendl;
+    return ret;
+  }
+
+  rgw_bucket_dir_entry ent;
+  obj.key.get_index_key(&ent.key);
+  ent.meta.size = size;
+  ent.meta.accounted_size = accounted_size;
+  ent.meta.mtime = ut;
+  ent.meta.etag = etag;
+  ent.meta.storage_class = storage_class;
+  if (user_data)
+    ent.meta.user_data = *user_data;
+
+  ACLOwner owner;
+  if (acl_bl && acl_bl->length()) {
+    int ret = store->decode_policy(*acl_bl, &owner);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "WARNING: could not decode policy ret=" << ret << dendl;
+    }
+  }
+  ent.meta.owner = owner.get_id().to_str();
+  ent.meta.owner_display_name = owner.get_display_name();
+  ent.meta.content_type = content_type;
+  ent.meta.appendable = appendable;
+
+  ent.meta.inline_head = true;
+  // inline head data
+  ent.meta.head_data = head_data;
+  ent.meta.head_attrs = head_attrs;
+
+  ret = store->cls_obj_complete_add_op_atomic(*bs, obj, optag,
+                                              ent, category,
+                                              remove_objs, bilog_flags,
+                                              cmp_eq_xattrs,
+                                              zones_trace);
+
+  int r = store->svc.datalog_rados->add_entry(dpp, target->bucket_info, bs->shard_id);
+  if (r < 0) {
+    ldpp_dout(dpp, -1) << "ERROR: failed writing data log" << dendl;
+  }
+
+  return ret;
+}
+
 int RGWRados::Object::Read::read(int64_t ofs, int64_t end, bufferlist& bl, optional_yield y, const DoutPrefixProvider *dpp)
 {
   RGWRados *store = source->get_store();
@@ -8896,6 +9174,58 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
   complete_op_data *arg;
   index_completion_manager->create_completion(obj, op, tag, ver, key, dir_meta, remove_objs,
                                               log_op, bilog_flags, &zones_trace, update_quota_stats, &arg);
+  librados::AioCompletion *completion = arg->rados_completion;
+  int ret = bs.bucket_obj.aio_operate(arg->rados_completion, &o);
+  completion->release(); /* can't reference arg here, as it might have already been released */
+  return ret;
+}
+
+int RGWRados::cls_obj_complete_add_op_atomic(BucketShard& bs, const rgw_obj& obj, string& tag,
+                                                 rgw_bucket_dir_entry& ent, RGWObjCategory category,
+                                                 list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
+                                                 std::map<string, string> &cmp_eq_xattrs,
+                                                 rgw_zone_set *_zones_trace)
+{
+  ObjectWriteOperation o;
+  o.assert_exists(); // bucket index shard must exist
+
+  rgw_bucket_dir_entry_meta dir_meta;
+  dir_meta = ent.meta;
+  dir_meta.category = category;
+
+  rgw_zone_set zones_trace;
+  if (_zones_trace) {
+    zones_trace = *_zones_trace;
+  }
+  zones_trace.insert(svc.zone->get_zone().id, bs.bucket.get_key());
+
+  rgw_bucket_entry_ver ver;
+  ver.pool = -1;
+  ver.epoch = 0;
+
+  cls_rgw_obj_key key(ent.key.name, ent.key.instance);
+  cls_rgw_guard_bucket_resharding(o, -ERR_BUSY_RESHARDING);
+  bool log_op = svc.zone->get_zone().log_data;
+
+  bufferlist in;
+  rgw_cls_obj_complete_op call;
+  call.tag = tag;
+  call.key = key;
+  call.meta = dir_meta;
+  call.log_op = log_op;
+  call.bilog_flags = bilog_flags;
+  if (remove_objs)
+    call.remove_objs = *remove_objs;
+  call.zones_trace = zones_trace;
+  call.update_quota_stats = true;
+  call.cmp_eq_xattrs = cmp_eq_xattrs;
+
+  encode(call, in);
+  o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP, in);
+
+  complete_op_data *arg;
+  index_completion_manager->create_completion(obj, CLS_RGW_OP_ADD, tag, ver, key, dir_meta, remove_objs,
+                                              log_op, bilog_flags, &zones_trace, true, &arg);
   librados::AioCompletion *completion = arg->rados_completion;
   int ret = bs.bucket_obj.aio_operate(arg->rados_completion, &o);
   completion->release(); /* can't reference arg here, as it might have already been released */

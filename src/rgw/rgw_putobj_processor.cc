@@ -319,7 +319,13 @@ int AtomicObjectProcessor::complete(size_t accounted_size,
     return r;
   }
 
-  r = obj_op->write_meta(dpp, actual_size, accounted_size, y);
+  if (actual_size <= get_head_chunk_size() && store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
+      // small object write
+      r = obj_op->write_meta_tiny_obj(dpp, actual_size, accounted_size, y);
+  }else {
+      r = obj_op->write_meta(dpp, actual_size, accounted_size, y);
+  }
+
   if (r < 0) {
     return r;
   }

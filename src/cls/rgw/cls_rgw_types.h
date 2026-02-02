@@ -192,11 +192,16 @@ struct rgw_bucket_dir_entry_meta {
   std::string storage_class;
   bool appendable;
 
+  // inline head data
+  bool inline_head;
+  bufferlist head_data;
+  std::map<string, bufferlist> head_attrs;
+
   rgw_bucket_dir_entry_meta() :
-    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false) { }
+    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false), inline_head(false) { }
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(7, 3, bl);
+    ENCODE_START(8, 3, bl);
     encode(category, bl);
     encode(size, bl);
     encode(mtime, bl);
@@ -208,6 +213,10 @@ struct rgw_bucket_dir_entry_meta {
     encode(user_data, bl);
     encode(storage_class, bl);
     encode(appendable, bl);
+
+    encode(inline_head, bl);
+    encode(head_data, bl);
+    encode(head_attrs, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -231,6 +240,11 @@ struct rgw_bucket_dir_entry_meta {
       decode(storage_class, bl);
     if (struct_v >= 7)
       decode(appendable, bl);
+    if (struct_v >= 8){
+      decode(inline_head, bl);
+      decode(head_data, bl);
+      decode(head_attrs, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;

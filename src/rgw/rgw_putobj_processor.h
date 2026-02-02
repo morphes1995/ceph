@@ -68,6 +68,7 @@ class HeadObjectProcessor : public ObjectProcessor {
   {}
 
   void set_head_chunk_size(uint64_t size) { head_chunk_size = size; }
+  uint64_t get_head_chunk_size() { return head_chunk_size; }
 
   // cache first chunk for process_first_chunk(), then forward everything else
   // to the returned processor

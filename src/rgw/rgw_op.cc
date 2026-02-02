@@ -4140,6 +4140,7 @@ void RGWPutObj::execute(optional_yield y)
       }
     }
   }
+  auto before_put_op_pipe = ceph::coarse_real_clock::now();
   tracepoint(rgw_op, before_data_transfer, s->req_id.c_str());
   do {
     bufferlist data;
@@ -4170,8 +4171,10 @@ void RGWPutObj::execute(optional_yield y)
 
     /* update torrrent */
     torrent.update(data);
-
+    auto before_put_op_filter_process = ceph::coarse_real_clock::now();
     op_ret = filter->process(std::move(data), ofs);
+    auto after_put_op_filter_process = ceph::coarse_real_clock::now();
+    ldpp_dout(this, 10) << "put op filter process time taken: "<< (after_put_op_filter_process - before_put_op_filter_process) << dendl;
     if (op_ret < 0) {
       ldpp_dout(this, 20) << "processor->process() returned ret="
           << op_ret << dendl;
@@ -4181,6 +4184,8 @@ void RGWPutObj::execute(optional_yield y)
     ofs += len;
   } while (len > 0);
   tracepoint(rgw_op, after_data_transfer, s->req_id.c_str(), ofs);
+  auto after_put_op_pipe = ceph::coarse_real_clock::now();
+  ldpp_dout(this, 20) << "put op pipe time taken: "<< (after_put_op_pipe - before_put_op_pipe) << dendl;
 
   // flush any data in filters
   op_ret = filter->process({}, ofs);
@@ -4286,12 +4291,15 @@ void RGWPutObj::execute(optional_yield y)
     emplace_attr(RGW_ATTR_OBJECT_RETENTION, std::move(obj_retention_bl));
   }
 
+  auto before_put_op_complete = ceph::coarse_real_clock::now();
   tracepoint(rgw_op, processor_complete_enter, s->req_id.c_str());
   op_ret = processor->complete(s->obj_size, etag, &mtime, real_time(), attrs,
                                (delete_at ? *delete_at : real_time()), if_match, if_nomatch,
                                (user_data.empty() ? nullptr : &user_data), nullptr, nullptr,
                                s->yield);
   tracepoint(rgw_op, processor_complete_exit, s->req_id.c_str());
+  auto after_put_op_complete = ceph::coarse_real_clock::now();
+  ldpp_dout(this, 20) << "put op complete time taken: "<< (after_put_op_complete - before_put_op_complete) << dendl;
 
   /* produce torrent */
   if (s->cct->_conf->rgw_torrent_flag && (ofs == torrent.get_data_len()))

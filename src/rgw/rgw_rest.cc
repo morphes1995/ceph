@@ -1052,8 +1052,10 @@ int RGWPutObj_ObjStore::get_data(bufferlist& bl)
   {
     ACCOUNTING_IO(s)->set_account(true);
     bufferptr bp(cl);
-
+    auto before_put_op_recv_body = ceph::coarse_real_clock::now();
     const auto read_len  = recv_body(s, bp.c_str(), cl);
+    auto after_put_op_recv_body = ceph::coarse_real_clock::now();
+    ldpp_dout(this, 20) << "put op recv body time taken: "<< (after_put_op_recv_body - before_put_op_recv_body) << " len:" <<read_len << dendl;
     if (read_len < 0) {
       return read_len;
     }

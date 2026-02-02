@@ -5933,6 +5933,11 @@ std::vector<Option> get_rgw_options() {
         "some of the maintenance work between them.")
     .add_see_also({"rgw_enable_gc_threads", "rgw_enable_quota_threads"}),
 
+    Option("rgw_enable_tiny_obj_atomic_put", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+            .set_default(false)
+            .set_description("Enables the tiny object's metadata atomic put optimization, "
+                             "which can speed up put performance, but hurt get op"),
+
     Option("rgw_data", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("/var/lib/ceph/radosgw/$cluster-$id")
     .set_flag(Option::FLAG_NO_MON_UPDATE)

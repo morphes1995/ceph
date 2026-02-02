@@ -424,6 +424,7 @@ class RGWObject {
 
       virtual int prepare(optional_yield y) = 0;
       virtual int write_meta(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size, optional_yield y) = 0;
+      virtual int write_meta_tiny_obj(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size, optional_yield y) = 0;
       //virtual int write_data(const char *data, uint64_t ofs, uint64_t len, bool exclusive) = 0;
     };
 
