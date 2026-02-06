@@ -364,6 +364,11 @@ void cls_rgw_obj_check_mtime(librados::ObjectOperation& o, const ceph::real_time
 int cls_rgw_bi_get(librados::IoCtx& io_ctx, const std::string oid,
                    BIIndexType index_type, cls_rgw_obj_key& key,
                    rgw_cls_bi_entry *entry);
+
+int cls_rgw_bi_get_obj_stat(librados::IoCtx& io_ctx, const std::string oid,
+                   BIIndexType index_type, cls_rgw_obj_key& key,
+                   rgw_cls_bi_entry *entry, bool prefetch_data, std::list<obj_version_cond> &conds);
+
 int cls_rgw_bi_put(librados::IoCtx& io_ctx, const std::string oid, rgw_cls_bi_entry& entry);
 void cls_rgw_bi_put(librados::ObjectWriteOperation& op, const std::string oid, rgw_cls_bi_entry& entry);
 int cls_rgw_bi_ent_remove(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace);

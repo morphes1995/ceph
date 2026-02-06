@@ -912,7 +912,7 @@ public:
       int delete_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int restore_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
-      bool origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_raw_obj &raw_obj, optional_yield y);
+      bool origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_obj &obj, rgw_raw_obj &raw_obj, optional_yield y);
     };
 
     struct Stat {
@@ -1401,10 +1401,14 @@ public:
    * a simple object read without keeping state
    */
 
-  int raw_obj_stat(const DoutPrefixProvider *dpp, 
+  int raw_obj_stat(const DoutPrefixProvider *dpp,
                    rgw_raw_obj& obj, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                    map<string, bufferlist> *attrs, bufferlist *first_chunk,
                    RGWObjVersionTracker *objv_tracker, optional_yield y);
+  int raw_obj_stat_from_bi(const DoutPrefixProvider *dpp,
+                           const RGWBucketInfo& bucket_info, const rgw_obj& obj, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
+                           map<string, bufferlist> *attrs, bufferlist *first_chunk,
+                           RGWObjVersionTracker *objv_tracker, optional_yield y);
 
   int obj_operate(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::ObjectWriteOperation *op);
   int obj_operate(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::ObjectReadOperation *op);
@@ -1569,6 +1573,8 @@ public:
   int cls_bucket_head_async(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id, RGWGetDirHeader_CB *ctx, int *num_aio);
 
   int bi_get_plain(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
+  int bi_get_obj_stat(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent,
+                      bool prefetch_data, std::list<obj_version_cond> &conds);
   int bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_olh(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_olh_entry *olh);
   int bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, BIIndexType index_type, rgw_cls_bi_entry *entry);

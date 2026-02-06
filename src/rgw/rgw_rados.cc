@@ -5547,7 +5547,7 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
       rgw_raw_obj raw_obj;
       store->obj_to_raw(target->bucket_info.placement_rule, origin_obj, &raw_obj);
       // check if the corresponding origin obj exist, if so tail objs should keep
-      if (origin_obj_existence_check(dpp, raw_obj, y)) {
+      if (origin_obj_existence_check(dpp, origin_obj, raw_obj, y)) {
           update_quota_stats = false;
           target->state->keep_tail = true;
           ldpp_dout(dpp, 0) << "WARNING: when deleting obj(" << obj.key.name << ")"
@@ -5620,10 +5620,16 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   return 0;
 }
 
-bool RGWRados::Object::Delete::origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_raw_obj &raw_obj,
+bool RGWRados::Object::Delete::origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_obj& obj, rgw_raw_obj &raw_obj,
                                                           optional_yield y) {
     map<string, bufferlist> origin_obj_attrset;
-    int fetch_origin_obj_res = target->get_store()->RGWRados::raw_obj_stat(dpp, raw_obj, NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL, y);
+    int fetch_origin_obj_res;
+    if (target->get_store()->cct->_conf->rgw_enable_tiny_obj_atomic_put){
+      fetch_origin_obj_res = target->get_store()->RGWRados::raw_obj_stat_from_bi(dpp, target->bucket_info, obj, NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL, y);
+    }else{
+      fetch_origin_obj_res = target->get_store()->RGWRados::raw_obj_stat(dpp, raw_obj, NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL, y);
+    }
+
     if (fetch_origin_obj_res >= 0 ){
         bufferlist id_tag_bl;
         if (target->state->get_attr(RGW_ATTR_ID_TAG, id_tag_bl) &&
@@ -5967,7 +5973,11 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
   int r = -ENOENT;
 
   if (!assume_noent) {
-    r = RGWRados::raw_obj_stat(dpp, raw_obj, &s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL, y);
+    if (cct->_conf->rgw_enable_tiny_obj_atomic_put){
+      r = RGWRados::raw_obj_stat_from_bi(dpp, bucket_info, obj, &s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL, y);
+    }else{
+      r = RGWRados::raw_obj_stat(dpp, raw_obj, &s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL, y);
+    }
   }
 
   if (r == -ENOENT) {
@@ -8435,8 +8445,11 @@ int RGWRados::raw_obj_stat(const DoutPrefixProvider *dpp,
   if (first_chunk) {
     op.read(0, cct->_conf->rgw_max_chunk_size, first_chunk, NULL);
   }
+  auto before_get_obj_stat = ceph::coarse_real_clock::now();
   bufferlist outbl;
   r = rgw_rados_operate(dpp, ref.pool.ioctx(), ref.obj.oid, &op, &outbl, y);
+  auto after_get_obj_stat = ceph::coarse_real_clock::now();
+  ldpp_dout(dpp, 20) << "get obj stat time taken: "<< (after_get_obj_stat - before_get_obj_stat) << dendl;
 
   if (epoch) {
     *epoch = ref.pool.ioctx().get_last_version();
@@ -8451,6 +8464,71 @@ int RGWRados::raw_obj_stat(const DoutPrefixProvider *dpp,
     *pmtime = ceph::real_clock::from_timespec(mtime_ts);
   if (attrs) {
     rgw_filter_attrset(unfiltered_attrset, RGW_ATTR_PREFIX, attrs);
+  }
+
+  return 0;
+}
+
+int RGWRados::raw_obj_stat_from_bi(const DoutPrefixProvider *dpp,
+                                   const RGWBucketInfo& bucket_info, const rgw_obj& obj, uint64_t *psize, real_time *pmtime, uint64_t *epoch,
+                                   map<string, bufferlist> *attrs, bufferlist *first_chunk,
+                                   RGWObjVersionTracker *objv_tracker, optional_yield y)
+{
+  int r = 0;
+  std::list<obj_version_cond> conds;
+  if (objv_tracker) {
+    obj_version *check_objv = objv_tracker->version_for_check();
+    if (check_objv) {
+      obj_version_cond c;
+      c.cond = VER_COND_EQ;
+      c.ver = *check_objv;
+      conds.push_back(c);
+    }
+  }
+
+  // read bucket index entry
+  rgw_bucket_dir_entry dirent;
+  auto before_bi_get_obj_stat = ceph::coarse_real_clock::now();
+  r = bi_get_obj_stat(dpp, bucket_info, obj, &dirent, first_chunk ? true : false, conds);
+  auto after_bi_get_obj_stat = ceph::coarse_real_clock::now();
+  ldpp_dout(dpp, 20) << "bi get obj stat time taken: "<< (after_bi_get_obj_stat - before_bi_get_obj_stat) << dendl;
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: "<< __func__ <<" read object(" << obj.key.name << ") bi entry error, r:" << r << dendl;
+    return r;
+  }
+
+  if (!dirent.meta.inline_head){
+    return -EINVAL;
+  }
+
+  if (attrs) {
+    rgw_filter_attrset(dirent.meta.head_attrs, RGW_ATTR_PREFIX, attrs);
+  }
+  if (first_chunk) {
+    ceph_assert(dirent.meta.size == dirent.meta.head_data.length());
+    *first_chunk = dirent.meta.head_data;
+  }
+
+  if (psize)
+    *psize = dirent.meta.size;
+  if (pmtime)
+    *pmtime = dirent.meta.mtime;
+
+  if (objv_tracker){
+    auto head_attrs = dirent.meta.head_attrs;
+    if (head_attrs.find("ceph.objclass.version") != head_attrs.end()){
+      try {
+        auto iter = head_attrs["ceph.objclass.version"].cbegin();
+        decode(objv_tracker->read_version, iter);
+      } catch (ceph::buffer::error& err) {
+        ldpp_dout(dpp, 0) << "ERROR: read_version(): failed to decode version entry" <<dendl;
+        return -EIO;
+      }
+    }
+  }
+
+  if (epoch) {
+    *epoch = 0;
   }
 
   return 0;
@@ -8898,6 +8976,38 @@ int RGWRados::bi_get_plain(const DoutPrefixProvider *dpp, const RGWBucketInfo& b
     }
 
     return 0;
+}
+
+int RGWRados::bi_get_obj_stat(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj,
+                           rgw_bucket_dir_entry *dirent, bool prefetch_data, std::list<obj_version_cond> &conds)
+{
+  rgw_cls_bi_entry bi_entry;
+  int r = 0;
+  BucketShard bs(this);
+  r = bs.init(dpp, bucket_info, obj);
+  if (r < 0) {
+    ldpp_dout(dpp, 5) << "bs.init() returned ret=" << r << dendl;
+    return r;
+  }
+
+  cls_rgw_obj_key key(obj.key.get_index_key_name(), obj.key.instance);
+  auto& ref = bs.bucket_obj.get_ref();
+  r = cls_rgw_bi_get_obj_stat(ref.pool.ioctx(), ref.obj.oid, BIIndexType::Plain, key, &bi_entry, prefetch_data, conds);
+  if (r < 0 && r != -ENOENT) {
+    ldpp_dout(dpp, 0) << "ERROR: bi_get() returned r=" << r << dendl;
+  }
+  if (r < 0) {
+    return r;
+  }
+  auto iter = bi_entry.data.cbegin();
+  try {
+    decode(*dirent, iter);
+  } catch (buffer::error& err) {
+    ldpp_dout(dpp, 0) << "ERROR: failed to decode bi_entry()" << dendl;
+    return -EIO;
+  }
+
+  return 0;
 }
 
 int RGWRados::bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj,
