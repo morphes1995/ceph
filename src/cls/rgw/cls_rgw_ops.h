@@ -5,6 +5,7 @@
 #define CEPH_CLS_RGW_OPS_H
 
 #include "cls/rgw/cls_rgw_types.h"
+#include "cls/version/cls_version_types.h"
 
 struct rgw_cls_tag_timeout_op
 {
@@ -679,6 +680,36 @@ struct rgw_cls_bi_get_ret {
   }
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_get_ret)
+
+struct rgw_cls_bi_get_obj_stat_op {
+  cls_rgw_obj_key key;
+  BIIndexType type; /* plain only currently */
+  std::list<obj_version_cond> conds;
+  bool prefetch_data;
+
+  rgw_cls_bi_get_obj_stat_op() : type(BIIndexType::Plain), prefetch_data(false) {}
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+      encode(key, bl);
+      encode((uint8_t)type, bl);
+      encode(prefetch_data, bl);
+      encode(conds, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& bl) {
+    DECODE_START(1, bl);
+      decode(key, bl);
+      uint8_t c;
+      decode(c, bl);
+      type = (BIIndexType)c;
+      decode(prefetch_data, bl);
+      decode(conds, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_get_obj_stat_op)
 
 struct rgw_cls_bi_put_op {
   rgw_cls_bi_entry entry;

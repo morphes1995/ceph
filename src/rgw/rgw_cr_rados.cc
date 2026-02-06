@@ -942,8 +942,13 @@ int RGWAsyncStatObj::_send_request(const DoutPrefixProvider *dpp)
 {
   rgw_raw_obj raw_obj;
   store->getRados()->obj_to_raw(bucket_info.placement_rule, obj, &raw_obj);
-  return store->getRados()->raw_obj_stat(dpp, raw_obj, psize, pmtime, pepoch,
-                             nullptr, nullptr, objv_tracker, null_yield);
+  if (store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
+    return store->getRados()->raw_obj_stat_from_bi(dpp, bucket_info, obj, psize, pmtime, pepoch,
+                                           nullptr, nullptr, objv_tracker, null_yield);
+  }else{
+    return store->getRados()->raw_obj_stat(dpp, raw_obj, psize, pmtime, pepoch,
+                                           nullptr, nullptr, objv_tracker, null_yield);
+  }
 }
 
 RGWStatObjCR::RGWStatObjCR(const DoutPrefixProvider *dpp, 

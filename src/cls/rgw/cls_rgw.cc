@@ -10,6 +10,7 @@
 #include "objclass/objclass.h"
 #include "cls/rgw/cls_rgw_ops.h"
 #include "cls/rgw/cls_rgw_const.h"
+#include "cls/version/cls_version_ops.h"
 #include "common/Clock.h"
 #include "common/strtol.h"
 #include "common/escape.h"
@@ -2684,6 +2685,126 @@ static int rgw_bi_get_op(cls_method_context_t hctx, bufferlist *in, bufferlist *
   return 0;
 }
 
+static bool check_conds(list<obj_version_cond>& conds, obj_version& objv)
+{
+  if (conds.empty())
+    return true;
+
+  for (list<obj_version_cond>::iterator iter = conds.begin(); iter != conds.end(); ++iter) {
+    obj_version_cond& cond = *iter;
+    obj_version& v = cond.ver;
+    CLS_LOG(20, "cls_version: check_version %s:%d (cond=%d)", v.tag.c_str(), (int)v.ver, (int)cond.cond);
+
+    switch (cond.cond) {
+      case VER_COND_NONE:
+        break;
+      case VER_COND_EQ:
+        if (!objv.compare(&v))
+          return false;
+        break;
+      case VER_COND_GT:
+        if (!(objv.ver > v.ver))
+          return false;
+        break;
+      case VER_COND_GE:
+        if (!(objv.ver >= v.ver))
+          return false;
+        break;
+      case VER_COND_LT:
+        if (!(objv.ver < v.ver))
+          return false;
+        break;
+      case VER_COND_LE:
+        if (!(objv.ver <= v.ver))
+          return false;
+        break;
+      case VER_COND_TAG_EQ:
+        if (objv.tag.compare(v.tag) != 0)
+          return false;
+        break;
+      case VER_COND_TAG_NE:
+        if (objv.tag.compare(v.tag) == 0)
+          return false;
+        break;
+    }
+  }
+
+  return true;
+}
+
+static int rgw_bi_get_obj_stat_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  // decode request
+  rgw_cls_bi_get_obj_stat_op op;
+  auto op_iter = in->cbegin();
+  try {
+    decode(op, op_iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(0, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  ceph_assert(op.type == BIIndexType::Plain);
+
+  string idx = op.key.name;
+  rgw_cls_bi_get_ret op_ret;
+
+  rgw_cls_bi_entry& entry = op_ret.entry;
+  entry.type = op.type;
+  entry.idx = idx;
+
+  bufferlist value;
+  int r = cls_cxx_map_get_val(hctx, idx, &value);
+  if (r < 0) {
+    CLS_LOG(10, "%s: cls_cxx_map_get_val() returned %d", __func__, r);
+    return r;
+  }
+
+  if (op.prefetch_data && op.conds.empty()){
+    // avoid a decode
+    entry.data = value;
+    encode(op_ret, *out);
+    return 0;
+  }
+
+  // decode is necessary
+  rgw_bucket_dir_entry disk_entry;
+  auto iter = value.cbegin();
+  try {
+    decode(disk_entry, iter);
+  } catch (ceph::buffer::error& err) {
+    return -EIO;
+  }
+
+  obj_version objv;
+  auto head_attrs = disk_entry.meta.head_attrs;
+  if (head_attrs.find("ceph.objclass.version") != head_attrs.end()){
+    try {
+      auto objv_iter = head_attrs["ceph.objclass.version"].cbegin();
+      decode(objv, objv_iter);
+    } catch (ceph::buffer::error& err) {
+      CLS_LOG(0, "ERROR: read_version(): failed to decode version entry", __func__);
+      return -EIO;
+    }
+  }
+  if (!check_conds(op.conds, objv)) {
+    return -ECANCELED;
+  }
+
+  if (op.prefetch_data){
+    entry.data = value;
+  }else {
+    // drop inlined head data ,then return
+    disk_entry.meta.head_data.clear();
+    encode(disk_entry, entry.data);
+  }
+
+  encode(op_ret, *out);
+
+  return 0;
+}
+
 static int rgw_bi_put_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   CLS_LOG(10, "entered %s()\n", __func__);
@@ -4574,6 +4695,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_obj_check_attrs_prefix;
   cls_method_handle_t h_rgw_obj_check_mtime;
   cls_method_handle_t h_rgw_bi_get_op;
+  cls_method_handle_t h_rgw_bi_get_obj_stat_op;
   cls_method_handle_t h_rgw_bi_put_op;
   cls_method_handle_t h_rgw_bi_ent_remove_op;
   cls_method_handle_t h_rgw_bi_list_op;
@@ -4628,6 +4750,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_OBJ_CHECK_MTIME, CLS_METHOD_RD, rgw_obj_check_mtime, &h_rgw_obj_check_mtime);
 
   cls_register_cxx_method(h_class, RGW_BI_GET, CLS_METHOD_RD, rgw_bi_get_op, &h_rgw_bi_get_op);
+  cls_register_cxx_method(h_class, RGW_BI_GET_OBJ_STAT, CLS_METHOD_RD, rgw_bi_get_obj_stat_op, &h_rgw_bi_get_obj_stat_op);
   cls_register_cxx_method(h_class, RGW_BI_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_put_op, &h_rgw_bi_put_op);
   cls_register_cxx_method(h_class, RGW_BI_ENT_RM, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_ent_remove_op, &h_rgw_bi_ent_remove_op);
   cls_register_cxx_method(h_class, RGW_BI_LIST, CLS_METHOD_RD, rgw_bi_list_op, &h_rgw_bi_list_op);

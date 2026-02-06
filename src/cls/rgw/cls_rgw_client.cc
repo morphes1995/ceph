@@ -443,6 +443,34 @@ int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
   return 0;
 }
 
+int cls_rgw_bi_get_obj_stat(librados::IoCtx& io_ctx, const string oid,
+                   BIIndexType index_type, cls_rgw_obj_key& key,
+                   rgw_cls_bi_entry *entry, bool prefetch_data, std::list<obj_version_cond> &conds)
+{
+  bufferlist in, out;
+  rgw_cls_bi_get_obj_stat_op call;
+  call.key = key;
+  call.type = index_type;
+  call.prefetch_data = prefetch_data;
+  call.conds = conds;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_BI_GET_OBJ_STAT, in, out);
+  if (r < 0)
+    return r;
+
+  rgw_cls_bi_get_ret op_ret;
+  auto iter = out.cbegin();
+  try {
+    decode(op_ret, iter);
+  } catch (ceph::buffer::error& err) {
+    return -EIO;
+  }
+
+  *entry = op_ret.entry;
+
+  return 0;
+}
+
 int cls_rgw_bi_put(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry)
 {
   bufferlist in, out;
