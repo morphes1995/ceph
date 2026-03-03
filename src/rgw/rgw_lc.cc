@@ -1968,7 +1968,7 @@ void RGWLifecycleConfiguration::generate_test_instances(
   o.push_back(new RGWLifecycleConfiguration);
 }
 
-inline void get_lc_oid(CephContext *cct,
+void get_lc_oid(CephContext *cct,
 			      const string& shard_id, string *oid)
 {
   int max_objs =
