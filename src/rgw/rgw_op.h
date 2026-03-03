@@ -854,9 +854,9 @@ protected:
   int parse_max_keys();
 
 public:
-  RGWListBucket() : list_versions(false), max(0),
+  RGWListBucket() : list_versions(false), show_trash(false), max(0),
                     default_max(0), is_truncated(false),
-		    allow_unordered(false), shard_id(-1), show_trash(false){}
+		    allow_unordered(false), shard_id(-1){}
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
