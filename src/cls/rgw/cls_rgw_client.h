@@ -364,10 +364,9 @@ void cls_rgw_obj_check_mtime(librados::ObjectOperation& o, const ceph::real_time
 int cls_rgw_bi_get(librados::IoCtx& io_ctx, const std::string oid,
                    BIIndexType index_type, cls_rgw_obj_key& key,
                    rgw_cls_bi_entry *entry);
-
-int cls_rgw_bi_get_obj_stat(librados::IoCtx& io_ctx, const std::string oid,
-                   BIIndexType index_type, cls_rgw_obj_key& key,
-                   rgw_cls_bi_entry *entry, bool prefetch_data, std::list<obj_version_cond> &conds);
+void cls_rgw_bi_get_obj_stat_op(librados::ObjectReadOperation& op,
+                               BIIndexType index_type, cls_rgw_obj_key& key,
+                               bool prefetch_data, std::list<obj_version_cond> &conds, rgw_cls_bi_get_ret *result);
 
 int cls_rgw_bi_put(librados::IoCtx& io_ctx, const std::string oid, rgw_cls_bi_entry& entry);
 void cls_rgw_bi_put(librados::ObjectWriteOperation& op, const std::string oid, rgw_cls_bi_entry& entry);
@@ -566,6 +565,19 @@ protected:
 public:
   CLSRGWIssueBucketBILogStop(librados::IoCtx& io_ctx, std::map<int, std::string>& _bucket_objs, uint32_t max_aio) :
     CLSRGWConcurrentIO(io_ctx, _bucket_objs, max_aio) {}
+};
+
+class RGWObjStateAioManager;
+/*
+ * RGW object get state op AIO request argument, this is used to pass an argument
+ * to callback.
+ */
+struct RGWObjGetStateAioArg : public RefCountedObject {
+    RGWObjGetStateAioArg(bool _is_from_head, RGWObjStateAioManager* _manager, const string &_oid) :
+            is_from_head(_is_from_head),  oid(_oid), manager(_manager){}
+    bool is_from_head;
+    const string oid;
+    RGWObjStateAioManager* manager;
 };
 
 int cls_rgw_get_dir_header_async(librados::IoCtx& io_ctx, std::string& oid, RGWGetDirHeader_CB *ctx);
