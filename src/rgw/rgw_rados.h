@@ -20,6 +20,7 @@
 #include "cls/log/cls_log_types.h"
 #include "cls/timeindex/cls_timeindex_types.h"
 #include "cls/otp/cls_otp_types.h"
+#include "cls/rgw/cls_rgw_client.h"
 #include "rgw_log.h"
 #include "rgw_metadata.h"
 #include "rgw_meta_sync_status.h"
@@ -395,6 +396,131 @@ class lru_map;
 using tombstone_cache_t = lru_map<rgw_obj, tombstone_entry>;
 
 class RGWIndexCompletionManager;
+
+
+
+/*
+ * This class manages AIO completions of concurrent rgw object state get operation
+ */
+class RGWObjStateAioManager {
+private:
+    const DoutPrefixProvider *dpp;
+    // unfinished
+    librados::AioCompletion* pending_from_bi_entry{NULL};
+    librados::AioCompletion* pending_from_head{NULL};
+    // finished
+    librados::AioCompletion* completion_from_bi_entry{NULL};
+    librados::AioCompletion* completion_from_head{NULL};
+
+    ceph::mutex lock = ceph::make_mutex("RGWObjStateAioManager::lock");
+    ceph::condition_variable cond;
+
+
+    utime_t head_op_start;
+    utime_t bi_entry_op_start;
+    /*
+     * Callback implementation for AIO request.
+     */
+    static void get_obj_state_op_completion_cb(void* cb, void* arg) {
+      RGWObjGetStateAioArg* cb_arg = (RGWObjGetStateAioArg*) arg;
+      cb_arg->manager->do_completion(cb_arg->is_from_head, cb_arg->oid);
+      cb_arg->put();
+    }
+
+    /*
+     * Add a new pending AIO completion instance.
+     */
+    void add_pending(bool is_from_head, librados::AioCompletion* completion) {
+      if (is_from_head){
+        ceph_assert(pending_from_head == NULL);
+        pending_from_head = completion;
+      }else{
+        ceph_assert(pending_from_bi_entry == NULL);
+        pending_from_bi_entry = completion;
+      }
+    }
+
+public:
+    RGWObjStateAioManager(const DoutPrefixProvider *_dpp): dpp(_dpp) {};
+
+    /*
+     * Do completion for the given AIO request.
+     */
+    void do_completion(bool is_from_head, const string &oid);
+
+    /*
+     *  Wait for AIO completions.
+     * @param head_ret_code   return code of the op that get obj state from head object attrs
+     * @param bi_entry_ret_code  return code of the op that get obj state from object bucket index entry
+     */
+    void wait_for_completions(int *head_ret_code, int *bi_entry_ret_code);
+
+    /**
+     * Do aio read operation.
+     */
+    bool aio_operate(librados::IoCtx& io_ctx, const std::string& oid, librados::ObjectReadOperation *op, bool is_from_head) {
+      std::lock_guard l{lock};
+      RGWObjGetStateAioArg *arg = new RGWObjGetStateAioArg(is_from_head, this, oid);
+      librados::AioCompletion *c = librados::Rados::aio_create_completion((void*)arg, get_obj_state_op_completion_cb);
+      int r = io_ctx.aio_operate(oid, c, (librados::ObjectReadOperation*)op, NULL);
+      if (is_from_head){
+        head_op_start = ceph_clock_now();
+        ldpp_dout(dpp, 20) << "issuing async op to get rgw object state from head obj:  "  << oid << " time: " << head_op_start <<dendl;
+      }else{
+        bi_entry_op_start = ceph_clock_now();
+        ldpp_dout(dpp, 20) << "issuing async op to get rgw object state from bi entry:  "  << oid << " time: " << bi_entry_op_start <<dendl;
+      }
+
+      if (r >= 0) {
+        add_pending(arg->is_from_head, c);
+      } else {
+        arg->put();
+        c->release();
+      }
+      return r;
+    }
+};
+
+
+/*
+ * This class manages AIO completions of concurrent rgw object state get operation
+ */
+class RGWConcurrentGetObjState {
+    const DoutPrefixProvider *dpp;
+    CephContext *cct;
+    RGWObjStateAioManager manager;
+    // for bucket index entry
+    librados::IoCtx& data_pool_io_ctx;
+    const string& head_oid;
+    struct rgw_head_get_ret {
+        uint64_t size;
+        struct timespec mtime_ts;
+        bufferlist first_chunk;
+        map<string, bufferlist> unfiltered_attrset;
+        RGWObjVersionTracker objv_tracker;
+    };
+    rgw_head_get_ret result_from_head;  // tmp result from head
+
+    // for rgw obj head
+    librados::IoCtx& index_pool_io_ctx;
+    const std::string& shard_oid;
+    const rgw_obj_key obj_key;
+    rgw_cls_bi_get_ret result_from_bi_entry; // tmp result from bucket index entry
+
+    int issue_get_obj_state_from_head_op(uint64_t *psize, ceph::real_time *pmtime, map<string, bufferlist> *attrs,
+                                         bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+    int issue_get_obj_state_from_bi_entry_op(bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+public:
+    RGWConcurrentGetObjState(const DoutPrefixProvider *_dpp, CephContext *_cct,
+                             librados::IoCtx& _data_io_ctx, string& _head_oid,
+                             librados::IoCtx& _index_io_ctx, std::string& _shard_oid, const rgw_obj_key& _obj_key):
+            dpp(_dpp), cct(_cct), manager(_dpp),
+            data_pool_io_ctx(_data_io_ctx), head_oid(_head_oid),
+            index_pool_io_ctx(_index_io_ctx), shard_oid(_shard_oid), obj_key(_obj_key) {  }
+
+    int issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
+                 bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker);
+};
 
 class RGWRados
 {
@@ -1406,11 +1532,6 @@ public:
                    rgw_raw_obj& obj, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                    map<string, bufferlist> *attrs, bufferlist *first_chunk,
                    RGWObjVersionTracker *objv_tracker, optional_yield y);
-  int raw_obj_stat_from_bi(const DoutPrefixProvider *dpp,
-                           const RGWBucketInfo& bucket_info, const rgw_obj& obj, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
-                           map<string, bufferlist> *attrs, bufferlist *first_chunk,
-                           RGWObjVersionTracker *objv_tracker, optional_yield y);
-
   int obj_operate(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::ObjectWriteOperation *op);
   int obj_operate(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::ObjectReadOperation *op);
 
@@ -1574,8 +1695,6 @@ public:
   int cls_bucket_head_async(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id, RGWGetDirHeader_CB *ctx, int *num_aio);
 
   int bi_get_plain(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
-  int bi_get_obj_stat(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent,
-                      bool prefetch_data, std::list<obj_version_cond> &conds);
   int bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_olh(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_olh_entry *olh);
   int bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, BIIndexType index_type, rgw_cls_bi_entry *entry);

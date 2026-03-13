@@ -8,6 +8,7 @@
 #include "rgw_cr_rados.h"
 #include "rgw_sync_counters.h"
 #include "rgw_bucket.h"
+#include "rgw_rados.h"
 
 #include "services/svc_zone.h"
 #include "services/svc_zone_utils.h"
@@ -943,8 +944,28 @@ int RGWAsyncStatObj::_send_request(const DoutPrefixProvider *dpp)
   rgw_raw_obj raw_obj;
   store->getRados()->obj_to_raw(bucket_info.placement_rule, obj, &raw_obj);
   if (store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
-    return store->getRados()->raw_obj_stat_from_bi(dpp, bucket_info, obj, psize, pmtime, pepoch,
-                                           nullptr, nullptr, objv_tracker, null_yield);
+    int r = 0;
+    RGWSI_RADOS::Obj bucket_obj;
+    int shard_id = -1;
+    r = store->svc()->bi_rados->open_bucket_index_shard(dpp, bucket_info,
+                                                           obj.get_hash_object(),
+                                                           &bucket_obj,
+                                                           &shard_id);
+    if (r < 0) {
+      ldpp_dout(dpp, 5) << "bucket shard obj init failed, returned ret=" << r << dendl;
+      return r;
+    }
+
+    rgw_rados_ref ref;
+    r = store->getRados()->get_raw_obj_ref(dpp, raw_obj, &ref);
+    if (r < 0) {
+      return r;
+    }
+
+    RGWConcurrentGetObjState concurrentGetState(dpp, store->ctx(), ref.pool.ioctx(), ref.obj.oid,
+                                                bucket_obj.get_ref().pool.ioctx(),  bucket_obj.get_ref().obj.oid, obj.key);
+    // issue concurrent ops to search rgw object state from both head object attr and bucket index entry
+    r = concurrentGetState.issue_op(psize, pmtime, pepoch, NULL, NULL, NULL);
   }else{
     return store->getRados()->raw_obj_stat(dpp, raw_obj, psize, pmtime, pepoch,
                                            nullptr, nullptr, objv_tracker, null_yield);

@@ -443,32 +443,48 @@ int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
   return 0;
 }
 
-int cls_rgw_bi_get_obj_stat(librados::IoCtx& io_ctx, const string oid,
-                   BIIndexType index_type, cls_rgw_obj_key& key,
-                   rgw_cls_bi_entry *entry, bool prefetch_data, std::list<obj_version_cond> &conds)
+/*
+ * This class represents the get object state from bucket index entry operation callback context.
+ */
+template <typename T>
+class RGWObjStateAioOpCtx : public ObjectOperationCompletion {
+private:
+    T *data;
+    int *ret_code;
+public:
+    RGWObjStateAioOpCtx(T* _data, int *_ret_code) : data(_data), ret_code(_ret_code) { ceph_assert(data); }
+    ~RGWObjStateAioOpCtx() override {}
+    void handle_completion(int r, bufferlist& outbl) override {
+      // if successful , copy result into destination (*data)
+      if (r >= 0) {
+        try {
+          auto iter = outbl.cbegin();
+          decode((*data), iter);
+        } catch (ceph::buffer::error& err) {
+          r = -EIO;
+        }
+      }
+      if (ret_code) {
+        *ret_code = r;
+      }
+    }
+};
+
+void cls_rgw_bi_get_obj_stat_op(librados::ObjectReadOperation& op,
+                               BIIndexType index_type, cls_rgw_obj_key& key,
+                               bool prefetch_data, std::list<obj_version_cond> &conds,
+                               rgw_cls_bi_get_ret *result)
 {
-  bufferlist in, out;
+  bufferlist in;
   rgw_cls_bi_get_obj_stat_op call;
   call.key = key;
   call.type = index_type;
   call.prefetch_data = prefetch_data;
   call.conds = conds;
   encode(call, in);
-  int r = io_ctx.exec(oid, RGW_CLASS, RGW_BI_GET_OBJ_STAT, in, out);
-  if (r < 0)
-    return r;
-
-  rgw_cls_bi_get_ret op_ret;
-  auto iter = out.cbegin();
-  try {
-    decode(op_ret, iter);
-  } catch (ceph::buffer::error& err) {
-    return -EIO;
-  }
-
-  *entry = op_ret.entry;
-
-  return 0;
+  // when aio_operate completes, call RGWObjStateAioOpCtx.handle_completion(), inflate the result
+  op.exec(RGW_CLASS, RGW_BI_GET_OBJ_STAT, in,
+          new RGWObjStateAioOpCtx<rgw_cls_bi_get_ret>(result, NULL));
 }
 
 int cls_rgw_bi_put(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry)
