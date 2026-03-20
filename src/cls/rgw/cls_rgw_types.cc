@@ -92,6 +92,7 @@ void rgw_bucket_pending_info::dump(Formatter *f) const
   utime_t ut(timestamp);
   encode_json("timestamp", ut, f);
   encode_json("op", (int)op, f);
+  encode_json("pending_index_epoch", pending_index_epoch, f);
 }
 
 void rgw_bucket_pending_info::decode_json(JSONObj *obj) {
@@ -102,6 +103,7 @@ void rgw_bucket_pending_info::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("timestamp", ut, obj);
   JSONDecoder::decode_json("op", val, obj);
   op = (uint8_t)val;
+  JSONDecoder::decode_json("pending_index_epoch", pending_index_epoch, obj);
 }
 
 void cls_rgw_obj_key::decode_json(JSONObj *obj) {
@@ -138,9 +140,9 @@ void rgw_bucket_dir_entry_meta::dump(Formatter *f) const
   encode_json("appendable", appendable, f);
 
   encode_json("inline_head", inline_head, f);
-  int  head_data_size = head_data.length();
   encode_json("head_data_size", head_data_size, f);
   encode_json("head_attrs", head_attrs, f);
+  encode_json("inline_index_epoch", inline_index_epoch, f);
 }
 
 void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
@@ -161,9 +163,9 @@ void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("appendable", appendable, obj);
 
   JSONDecoder::decode_json("inline_head", inline_head, obj);
-  int  head_data_size = head_data.length();
   JSONDecoder::decode_json("head_data_size", head_data_size, obj);
   JSONDecoder::decode_json("head_attrs", head_attrs, obj);
+  JSONDecoder::decode_json("inline_index_epoch", inline_index_epoch, obj);
 }
 
 void rgw_bucket_dir_entry::generate_test_instances(list<rgw_bucket_dir_entry*>& o)

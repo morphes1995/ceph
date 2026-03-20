@@ -360,6 +360,7 @@ void cls_rgw_remove_obj(librados::ObjectWriteOperation& o, std::list<std::string
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const std::string& attr);
 void cls_rgw_obj_check_attrs_prefix(librados::ObjectOperation& o, const std::string& prefix, bool fail_if_exist);
 void cls_rgw_obj_check_mtime(librados::ObjectOperation& o, const ceph::real_time& mtime, bool high_precision_time, RGWCheckMTimeType type);
+void cls_rgw_obj_check_mtime_bi(librados::ObjectOperation& o, cls_rgw_obj_key &key, const ceph::real_time& mtime, bool high_precision_time, RGWCheckMTimeType type);
 
 int cls_rgw_bi_get(librados::IoCtx& io_ctx, const std::string oid,
                    BIIndexType index_type, cls_rgw_obj_key& key,
@@ -648,6 +649,7 @@ int cls_rgw_set_bucket_resharding(librados::IoCtx& io_ctx, const std::string& oi
 int cls_rgw_clear_bucket_resharding(librados::IoCtx& io_ctx, const std::string& oid);
 int cls_rgw_get_bucket_resharding(librados::IoCtx& io_ctx, const std::string& oid,
                                   cls_rgw_bucket_instance_entry *entry);
+void cls_epoch_read(librados::ObjectWriteOperation& op, uint64_t *epoch);
 #endif
 
 #endif

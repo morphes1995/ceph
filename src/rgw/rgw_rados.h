@@ -178,6 +178,16 @@ struct RGWObjState {
   uint64_t pg_ver{false};
   uint32_t zone_short_id{0};
 
+  // rgw object state inlined in bucket index entry or not
+  bool inlined{false};
+  // when the state is from bucket index entry, is there head object exists ?
+  bool head_exists{false};
+  // if the head object exists, obj tag in head object
+  bufferlist head_obj_tag;
+  // if the head object exists, manifest in head object, used to gc tails when overwrite
+  std::optional<RGWObjManifest> head_manifest;
+  uint64_t head_rados_size{0}; // if the head object exists, size head object
+
   /* important! don't forget to update copy constructor */
 
   RGWObjVersionTracker objv_tracker;
@@ -510,6 +520,12 @@ class RGWConcurrentGetObjState {
     int issue_get_obj_state_from_head_op(uint64_t *psize, ceph::real_time *pmtime, map<string, bufferlist> *attrs,
                                          bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
     int issue_get_obj_state_from_bi_entry_op(bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+    void parse_head_as_result(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
+                             bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+    int parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
+                                                            map<string, bufferlist> *attrs,
+                                                            bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+
 public:
     RGWConcurrentGetObjState(const DoutPrefixProvider *_dpp, CephContext *_cct,
                              librados::IoCtx& _data_io_ctx, string& _head_oid,
@@ -519,7 +535,8 @@ public:
             index_pool_io_ctx(_index_io_ctx), shard_oid(_shard_oid), obj_key(_obj_key) {  }
 
     int issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
-                 bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker);
+                 bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker,
+                 bool* inlined = NULL, bool* head_exists = NULL, bufferlist *head_obj_tag = NULL, uint64_t *head_rados_size = NULL);
 };
 
 class RGWRados
@@ -1036,6 +1053,7 @@ public:
       
       explicit Delete(RGWRados::Object *_target) : target(_target) {}
 
+      int delete_tiny_object(const DoutPrefixProvider *dpp, RGWObjState *state);
       int delete_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int restore_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
@@ -1093,6 +1111,7 @@ public:
     }
 
     class UpdateIndex {
+    protected:
       RGWRados::Bucket *target;
       string optag;
       rgw_obj obj;
@@ -1102,6 +1121,7 @@ public:
       bool blind;
       bool prepared{false};
       rgw_zone_set *zones_trace{nullptr};
+      uint64_t index_pool_epoch;
 
       int init_bs(const DoutPrefixProvider *dpp) {
         int r =
@@ -1139,6 +1159,10 @@ public:
       void set_bilog_flags(uint16_t flags) {
         bilog_flags = flags;
       }
+
+      uint64_t  get_epoch(){
+        return index_pool_epoch;
+      }
       
       void set_zones_trace(rgw_zone_set *_zones_trace) {
         zones_trace = _zones_trace;
@@ -1164,46 +1188,18 @@ public:
       bool is_prepared() { return prepared; }
     }; // class UpdateIndex
 
-    class UpdateIndexAtomic {
-      RGWRados::Bucket *target;
-      string optag;
-      rgw_obj obj;
-      uint16_t bilog_flags{0};
-      BucketShard bs;
-      bool bs_initialized{false};
-      rgw_zone_set *zones_trace{nullptr};
-
-      std::map<string, string> cmp_eq_xattrs;
-      // inline head data
-      bufferlist head_data;
-      std::map<string, bufferlist> head_attrs;
-
-
-      int init_bs(const DoutPrefixProvider *dpp) {
-        int r =bs.init(target->get_bucket(), obj, nullptr /* no RGWBucketInfo */, dpp);
-        if (r < 0) {
-          return r;
-        }
-        bs_initialized = true;
-        return 0;
-      }
-
-      int guard_reshard(const DoutPrefixProvider *dpp, BucketShard **pbs, std::function<int(BucketShard *)> call);
+      class UpdateIndexAtomic :public UpdateIndex {
+        // need check mtime before deletion
+        bool check_mtime{false};
+        real_time mtime;
+        bool high_precision_time;
+        RGWCheckMTimeType type;
+        // inline head data
+        bufferlist head_data;
+        std::map<string, bufferlist> head_attrs;
     public:
 
-      UpdateIndexAtomic(RGWRados::Bucket *_target, const rgw_obj& _obj) : target(_target), obj(_obj),
-                                                                    bs(target->get_store()) {}
-
-      int get_bucket_shard(BucketShard **pbs, const DoutPrefixProvider *dpp) {
-        if (!bs_initialized) {
-          int r = init_bs(dpp);
-          if (r < 0) {
-            return r;
-          }
-        }
-        *pbs = &bs;
-        return 0;
-      }
+      UpdateIndexAtomic(RGWRados::Bucket *_target, const rgw_obj& _obj) : UpdateIndex(_target, _obj) {}
 
       void set_bilog_flags(uint16_t flags) {
         bilog_flags = flags;
@@ -1213,19 +1209,27 @@ public:
         zones_trace = _zones_trace;
       }
 
-      int complete_atomic(const DoutPrefixProvider *dpp, uint64_t size,
+      int complete_atomic_add(const DoutPrefixProvider *dpp, uint64_t size,
                    uint64_t accounted_size, ceph::real_time& ut,
                    const string& etag, const string& content_type,
                    const string& storage_class,
                    bufferlist *acl_bl, RGWObjCategory category,
                    list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false);
+        int complete_atomic_del(const DoutPrefixProvider *dpp,
+                                real_time& removed_mtime,
+                                list<rgw_obj_index_key> *remove_objs);
 
       void set_head_attr(const string &name, const bufferlist& v){
         head_attrs.emplace(name, v);
       }
-      void set_cmp_eq_xattrs(const string &name, const string& v){
-        cmp_eq_xattrs.emplace(name, v);
+
+      void need_check_mtime(real_time& _mtime, bool _high_precision_time, RGWCheckMTimeType _type){
+        check_mtime = true;
+        mtime = _mtime;
+        high_precision_time = _high_precision_time;
+        type = _type;
       }
+
       void set_head_data(const bufferlist& v){
         head_data = v;
       }
@@ -1641,19 +1645,19 @@ public:
   int cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModifyOp op, string& tag, int64_t pool, uint64_t epoch,
                           rgw_bucket_dir_entry& ent, RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                           rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);
-  int cls_obj_complete_add_op_atomic(BucketShard& bs, const rgw_obj& obj, string& tag,
+  int cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, const rgw_obj& obj, string& tag,
                                      rgw_bucket_dir_entry& ent, RGWObjCategory category,
-                                     list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
-                                     std::map<string, string> &cmp_eq_xattrs,
-                                     rgw_zone_set *_zones_trace = nullptr);
+                                     list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *_zones_trace = nullptr);
   int cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag, int64_t pool, uint64_t epoch, rgw_bucket_dir_entry& ent,
                            RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);
   int cls_obj_complete_del(BucketShard& bs, string& tag, int64_t pool, uint64_t epoch, rgw_obj& obj,
                            ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
-  int cls_obj_complete_rename(BucketShard& bs, string& tag, int64_t pool, uint64_t epoch, rgw_obj& obj,
-                           ceph::real_time& rename_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
+  int cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, string& tag, rgw_obj& obj,
+                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs,
+                           bool check_mtime, real_time mtime, bool high_precision_time, RGWCheckMTimeType type,
+                           uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_complete_cancel(BucketShard& bs, std::string& tag, rgw_obj& obj,
                               std::list<rgw_obj_index_key> *remove_objs,
                               uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);

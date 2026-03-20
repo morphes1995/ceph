@@ -82,6 +82,8 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_SHADOW_OBJ    	RGW_ATTR_PREFIX "shadow_name"
 #define RGW_ATTR_MANIFEST    	RGW_ATTR_PREFIX "manifest"
 #define RGW_ATTR_USER_MANIFEST  RGW_ATTR_PREFIX "user_manifest"
+#define RGW_ATTR_HEAD_MANIFEST    	RGW_ATTR_PREFIX "head_manifest"
+#define RGW_ATTR_HEAD_RADOS_SIZE    	RGW_ATTR_PREFIX "head_rados_size"
 #define RGW_ATTR_AMZ_WEBSITE_REDIRECT_LOCATION	RGW_ATTR_PREFIX RGW_AMZ_WEBSITE_REDIRECT_LOCATION
 #define RGW_ATTR_SLO_MANIFEST   RGW_ATTR_PREFIX "slo_manifest"
 /* Information whether an object is SLO or not must be exposed to
@@ -89,6 +91,7 @@ using ceph::crypto::MD5;
 #define RGW_ATTR_SLO_UINDICATOR RGW_ATTR_META_PREFIX "static-large-object"
 #define RGW_ATTR_X_ROBOTS_TAG	RGW_ATTR_PREFIX "x-robots-tag"
 #define RGW_ATTR_STORAGE_CLASS  RGW_ATTR_PREFIX "storage_class"
+#define RGW_ATTR_INDEX_POOL_EPOCH  RGW_ATTR_PREFIX "index_pool_epoch"
 
 /* S3 Object Lock*/
 #define RGW_ATTR_OBJECT_LOCK        RGW_ATTR_PREFIX "object-lock"

@@ -100,13 +100,11 @@ struct rgw_cls_obj_complete_op
   // for 1) delete object to trash, 2) restore object from trash
   // stats in omap header should not change
   bool update_quota_stats;
-  // extra params of cls_obj_complete_add_op_atomic
-  std::map<string, string> cmp_eq_xattrs;
 
   rgw_cls_obj_complete_op() : op(CLS_RGW_OP_ADD), log_op(false), bilog_flags(0), update_quota_stats(true){}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(11, 7, bl);
+    ENCODE_START(10, 7, bl);
     uint8_t c = (uint8_t)op;
     encode(c, bl);
     encode(ver.epoch, bl);
@@ -120,11 +118,10 @@ struct rgw_cls_obj_complete_op
     encode(bilog_flags, bl);
     encode(zones_trace, bl);
     encode(update_quota_stats, bl);
-    encode(cmp_eq_xattrs, bl);
     ENCODE_FINISH(bl);
  }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(11, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(10, 3, 3, bl);
     uint8_t c;
     decode(c, bl);
     op = (RGWModifyOp)c;
@@ -169,9 +166,6 @@ struct rgw_cls_obj_complete_op
     }
     if (struct_v >= 10) {
         decode(update_quota_stats, bl);
-    }
-    if (struct_v >= 11) {
-      decode(cmp_eq_xattrs, bl);
     }
     DECODE_FINISH(bl);
   }
@@ -589,25 +583,30 @@ struct rgw_cls_obj_check_mtime {
   ceph::real_time mtime;
   RGWCheckMTimeType type;
   bool high_precision_time;
+  cls_rgw_obj_key key;
 
   rgw_cls_obj_check_mtime() : type(CLS_RGW_CHECK_TIME_MTIME_EQ), high_precision_time(false) {}
 
   void encode(ceph::buffer::list& bl) const {
-    ENCODE_START(2, 1, bl);
+    ENCODE_START(3, 1, bl);
     encode(mtime, bl);
     encode((uint8_t)type, bl);
     encode(high_precision_time, bl);
+    encode(key, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    DECODE_START(2, bl);
+    DECODE_START(3, bl);
     decode(mtime, bl);
     uint8_t c;
     decode(c, bl);
     type = (RGWCheckMTimeType)c;
     if (struct_v >= 2) {
       decode(high_precision_time, bl);
+    }
+    if (struct_v >= 3) {
+      decode(key, bl);
     }
     DECODE_FINISH(bl);
   }

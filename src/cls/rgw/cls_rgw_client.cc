@@ -417,6 +417,18 @@ void cls_rgw_obj_check_mtime(librados::ObjectOperation& o, const real_time& mtim
   o.exec(RGW_CLASS, RGW_OBJ_CHECK_MTIME, in);
 }
 
+void cls_rgw_obj_check_mtime_bi(librados::ObjectOperation& o, cls_rgw_obj_key &key, const real_time& mtime, bool high_precision_time, RGWCheckMTimeType type)
+{
+  bufferlist in;
+  rgw_cls_obj_check_mtime call;
+  call.mtime = mtime;
+  call.high_precision_time = high_precision_time;
+  call.type = type;
+  call.key = key;
+  encode(call, in);
+  o.exec(RGW_CLASS, RGW_OBJ_CHECK_MTIME_BI, in);
+}
+
 int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
                    BIIndexType index_type, cls_rgw_obj_key& key,
                    rgw_cls_bi_entry *entry)

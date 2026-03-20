@@ -135,15 +135,17 @@ struct rgw_bucket_pending_info {
   RGWPendingState state;
   ceph::real_time timestamp;
   uint8_t op;
+  uint64_t pending_index_epoch;
 
   rgw_bucket_pending_info() : state(CLS_RGW_STATE_PENDING_MODIFY), op(0) {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(2, 2, bl);
+    ENCODE_START(3, 2, bl);
     uint8_t s = (uint8_t)state;
     encode(s, bl);
     encode(timestamp, bl);
     encode(op, bl);
+    encode(pending_index_epoch, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -153,6 +155,9 @@ struct rgw_bucket_pending_info {
     state = (RGWPendingState)s;
     decode(timestamp, bl);
     decode(op, bl);
+    if (struct_v >= 3){
+      decode(pending_index_epoch, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(ceph::Formatter *f) const;
@@ -195,10 +200,12 @@ struct rgw_bucket_dir_entry_meta {
   // inline head data
   bool inline_head;
   bufferlist head_data;
+  uint64_t head_data_size;
   std::map<string, bufferlist> head_attrs;
+  uint64_t inline_index_epoch;
 
   rgw_bucket_dir_entry_meta() :
-    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false), inline_head(false) { }
+    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false), inline_head(false), head_data_size(0), inline_index_epoch(0) { }
 
   void encode(ceph::buffer::list &bl) const {
     ENCODE_START(8, 3, bl);
@@ -216,7 +223,9 @@ struct rgw_bucket_dir_entry_meta {
 
     encode(inline_head, bl);
     encode(head_data, bl);
+    encode(head_data_size, bl);
     encode(head_attrs, bl);
+    encode(inline_index_epoch, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -243,7 +252,9 @@ struct rgw_bucket_dir_entry_meta {
     if (struct_v >= 8){
       decode(inline_head, bl);
       decode(head_data, bl);
+      decode(head_data_size, bl);
       decode(head_attrs, bl);
+      decode(inline_index_epoch, bl);
     }
     DECODE_FINISH(bl);
   }

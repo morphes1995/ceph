@@ -33,6 +33,7 @@ constexpr int RGWBIAdvanceAndRetryError = -EFBIG;
 #define RGW_OBJ_STORE_PG_VER "obj_store_pg_ver"
 #define RGW_OBJ_CHECK_ATTRS_PREFIX "obj_check_attrs_prefix"
 #define RGW_OBJ_CHECK_MTIME "obj_check_mtime"
+#define RGW_OBJ_CHECK_MTIME_BI "obj_check_mtime_bi"
 
 #define RGW_BI_GET "bi_get"
 #define RGW_BI_GET_OBJ_STAT "bi_get_obj_stat"

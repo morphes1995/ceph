@@ -892,6 +892,7 @@ int rgw_bucket_prepare_op(cls_method_context_t hctx, bufferlist *in, bufferlist 
   info.timestamp = real_clock::now();
   info.state = CLS_RGW_STATE_PENDING_MODIFY;
   info.op = op.op;
+  info.pending_index_epoch = cls_current_version(hctx);
   entry.pending_map.insert(pair<string, rgw_bucket_pending_info>(op.tag, info));
 
   // write out new key to disk
@@ -1076,12 +1077,14 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
    * marker */
   entry.flags &= rgw_bucket_dir_entry::FLAG_VER;
 
+  uint64_t pending_index_epoch = 0;
   if (op.tag.size()) {
     auto pinter = entry.pending_map.find(op.tag);
     if (pinter == entry.pending_map.end()) {
       CLS_LOG(1, "ERROR: couldn't find tag for pending operation\n");
       return -EINVAL;
     }
+    pending_index_epoch = pinter->second.pending_index_epoch;
     entry.pending_map.erase(pinter);
   }
 
@@ -1093,6 +1096,15 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     op.op = CLS_RGW_OP_CANCEL;
   }
 
+  if (op.op != CLS_RGW_OP_CANCEL && op.tag.size()){
+    if(entry.meta.inline_head && entry.meta.inline_index_epoch > pending_index_epoch){
+      // inline head data writes to this entry after prepare op , we can not complete this entry, cancel this op and keep inlined entry latest
+      CLS_LOG(5, "rgw_bucket_complete_op(): skipping request, op: %d, we can not overwrite the inlined entry: "
+                 " inline_index_epoch: %ld, pending_index_epoch: %ld \n", op.op, entry.meta.inline_index_epoch, pending_index_epoch);
+      op.op = CLS_RGW_OP_CANCEL;
+    }
+  }
+
   // controls whether remove_objs deletions are logged
   const bool default_log_op = op.log_op && !header.syncstopped;
   // controls whether this operation is logged (depends on op.op and ondisk)
@@ -1102,7 +1114,9 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   if (op.op == CLS_RGW_OP_CANCEL) {
     log_op = false; // don't log cancelation
     if (op.tag.size()) {
-      if (!entry.exists && entry.pending_map.empty()) {
+      if (!entry.exists && entry.pending_map.empty()
+        /*  this inlined entry is still useful to cover the possibly existed head object, until it was overwritten or detached */
+        && !entry.meta.inline_head ) {
         // a racing delete succeeded, and we canceled the last pending op
         CLS_LOG(20, "INFO: %s: removing map entry with key=%s",
                 __func__, escape_str(idx).c_str());
@@ -1138,6 +1152,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       // no entry to erase
       log_op = false;
     } else if (!entry.pending_map.size()) {
+      ceph_assert(!entry.meta.inline_head);
       rc = cls_cxx_map_remove_key(hctx, idx);
       if (rc < 0) {
         return rc;
@@ -1204,7 +1219,6 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
 int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   CLS_LOG(10, "entered %s", __func__);
-
   // decode request
   rgw_cls_obj_complete_op op;
   auto iter = in->cbegin();
@@ -1216,11 +1230,11 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
   }
 
   CLS_LOG(1, "rgw_bucket_complete_atomic_op(): request: op=%d name=%s instance=%s ver=%lu:%llu tag=%s "
-             "inline_head=%d head_data_len=%d head_attrs_len=%d, cmp_eq_xattrs_len=%d",
+             "inline_head=%d head_data_len=%d head_attrs_len=%ld",
           op.op, op.key.name.c_str(), op.key.instance.c_str(),
           (unsigned long)op.ver.pool, (unsigned long long)op.ver.epoch,
           op.tag.c_str(),
-          op.meta.inline_head ,op.meta.head_data.length(), op.meta.head_attrs.size(), op.cmp_eq_xattrs.size());
+          op.meta.inline_head ,op.meta.head_data.length(), op.meta.head_attrs.size());
 
   rgw_bucket_dir_header header;
   int rc = read_bucket_header(hctx, &header);
@@ -1230,69 +1244,81 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
   }
 
   rgw_bucket_dir_entry entry;
-  bool already_exist = true;
-
   std::string idx;
   rc = read_key_entry(hctx, op.key, &idx, &entry);
-  if (rc == -ENOENT) {
-    already_exist = false;
-  } else if (rc < 0) {
+  if (rc < 0 && rc != -ENOENT) {
     return rc;
-  }
-
-  if (already_exist){
-    for (const auto &attr: op.cmp_eq_xattrs){
-      if (entry.meta.head_attrs.find(attr.first) == entry.meta.head_attrs.end()){
-        CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): precondition failed, attr %s did not exist! \n", attr.first.c_str());
-        return -EINVAL;
-      }
-      if (entry.meta.head_attrs[attr.first].c_str() != attr.second){
-      CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): precondition failed, attr %s mismatch! \n",
-              attr.first.c_str(), attr.second.c_str(), entry.meta.head_attrs[attr.first].c_str());
-      return -EINVAL;
-      }
-    }
-  }
-
-  if (op.update_quota_stats){
-    if (already_exist) {
-      // unaccount overwritten entry
-      rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
-      stats.num_entries--;
-      stats.total_size -= entry.meta.accounted_size;
-      stats.total_size_rounded -= cls_rgw_get_rounded_size(entry.meta.accounted_size);
-    }
   }
 
   // controls whether remove_objs deletions are logged
   const bool default_log_op = op.log_op && !header.syncstopped;
   // controls whether this operation is logged (depends on op.op and ondisk)
   bool log_op = default_log_op;
+  CLS_LOG(1, "rgw_bucket_complete_atomic_op(): op=%d, entry: name=%s, exists=%d inlined=%d",
+          op.op, entry.key.name.c_str(), entry.exists, entry.meta.inline_head);
 
-  entry.key = op.key;
+  if (op.op == CLS_RGW_OP_ADD){
+    if (op.update_quota_stats){
+      if (entry.exists) {
+        // unaccount overwritten entry
+        rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+        stats.num_entries--;
+        stats.total_size -= entry.meta.accounted_size;
+        stats.total_size_rounded -= cls_rgw_get_rounded_size(entry.meta.accounted_size);
+        stats.actual_size -= entry.meta.size;
+      }
+    }
+
+    entry.key = op.key;
 //  entry.ver = op.ver;
-  entry.meta = op.meta;
-  entry.locator = op.locator;
-  entry.index_ver = header.ver;
-  entry.exists = true;
-  entry.tag = op.tag;
+    entry.meta = op.meta;
+    entry.meta.inline_index_epoch = cls_current_version(hctx);
+    entry.locator = op.locator;
+    entry.index_ver = header.ver;
+    entry.exists = true;
+    entry.tag = op.tag;
 
-  rgw_bucket_dir_entry_meta& meta = op.meta;
-  if (op.update_quota_stats){
-    rgw_bucket_category_stats& stats = header.stats[meta.category];
-    // account for new entry
-    stats.num_entries++;
-    stats.total_size += meta.accounted_size;
-    stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
-    stats.actual_size += meta.size;
-  }
+    rgw_bucket_dir_entry_meta& meta = op.meta;
+    if (op.update_quota_stats){
+      rgw_bucket_category_stats& stats = header.stats[meta.category];
+      // account for new entry
+      stats.num_entries++;
+      stats.total_size += meta.accounted_size;
+      stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
+      stats.actual_size += meta.size;
+    }
 
-  bufferlist new_key_bl;
-  encode(entry, new_key_bl);
-  rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
-  if (rc < 0) {
-    return rc;
-  }
+    bufferlist new_key_bl;
+    encode(entry, new_key_bl);
+    rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+    if (rc < 0) {
+      return rc;
+    }
+  }// CLS_RGW_OP_ADD
+  else if (op.op == CLS_RGW_OP_DEL){
+    if (!entry.exists){
+      CLS_LOG(20, " %s  del op race failed, entry %s was already deleted!\n",
+              __func__ , entry.key.name.c_str());
+      return -ECANCELED;
+    }
+    // unaccount deleted entry
+    if (op.update_quota_stats){
+      unaccount_entry(header, entry);
+    }
+
+    entry.meta = op.meta;
+    // logically delete inlined object,use this entry to cover the possibly existed head object
+    entry.meta.inline_head = true;
+    entry.exists = false;
+    entry.meta.inline_index_epoch = cls_current_version(hctx);
+
+    bufferlist new_key_bl;
+    encode(entry, new_key_bl);
+    rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+    if (rc < 0) {
+      return rc;
+    }
+  } // CLS_RGW_OP_DEL
 
   if (log_op) {
     rc = log_index_operation(hctx, op.key, op.op, op.tag, entry.meta.mtime,
@@ -1304,7 +1330,7 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     }
   }
 
-  CLS_LOG(20, "rgw_bucket_complete_op(): remove_objs.size()=%d",
+  CLS_LOG(20, "rgw_bucket_complete_atomic_op(): remove_objs.size()=%d",
           (int)op.remove_objs.size());
   for (const auto& remove_key : op.remove_objs) {
     rc = complete_remove_obj(hctx, header, remove_key, default_log_op);
@@ -2383,9 +2409,14 @@ int rgw_dir_suggest_changes(cls_method_context_t hctx,
       switch(op) {
       case CEPH_RGW_REMOVE:
         CLS_LOG(10, "CEPH_RGW_REMOVE name=%s instance=%s", cur_change.key.name.c_str(), cur_change.key.instance.c_str());
-	ret = cls_cxx_map_remove_key(hctx, cur_change_key);
-	if (ret < 0)
-	  return ret;
+        if (cur_change.meta.inline_head && !cur_change.exists){
+          // we still use this stale entry to suggest the object nonexistence, currently delete it may cause orphan tail objects
+          CLS_LOG(10, "%s skip CEPH_RGW_REMOVE name=%s instance=%s, because entry is inlined!", __func__, cur_change.key.name.c_str(), cur_change.key.instance.c_str());
+          break;
+        }
+        ret = cls_cxx_map_remove_key(hctx, cur_change_key);
+        if (ret < 0)
+          return ret;
         if (log_op && cur_disk.exists && !header.syncstopped) {
           ret = log_index_operation(hctx, cur_disk.key, CLS_RGW_OP_DEL, cur_disk.tag, cur_disk.meta.mtime,
                                     cur_disk.ver, CLS_RGW_STATE_COMPLETE, header.ver, header.max_marker, 0, NULL, NULL, NULL);
@@ -2636,6 +2667,70 @@ static int rgw_obj_check_mtime(cls_method_context_t hctx, bufferlist *in, buffer
   return 0;
 }
 
+static int rgw_obj_check_mtime_bi(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  // decode request
+  rgw_cls_obj_check_mtime op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(0, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  rgw_bucket_dir_entry entry;
+  std::string idx;
+  int rc = read_key_entry(hctx, op.key, &idx, &entry);
+  if (rc < 0) {
+    return rc;
+  }
+  if (!entry.exists) {
+    return -ENOENT;
+  }
+
+  ceph_timespec obj_ts = ceph::real_clock::to_ceph_timespec( entry.meta.mtime);
+  ceph_timespec op_ts = ceph::real_clock::to_ceph_timespec(op.mtime);
+
+  if (!op.high_precision_time) {
+    obj_ts.tv_nsec = 0;
+    op_ts.tv_nsec = 0;
+  }
+
+  CLS_LOG(10, "%s: obj_ut=%lld.%06lld op.mtime=%lld.%06lld", __func__,
+          (long long)obj_ts.tv_sec, (long long)obj_ts.tv_nsec,
+          (long long)op_ts.tv_sec, (long long)op_ts.tv_nsec);
+
+  bool check;
+
+  switch (op.type) {
+    case CLS_RGW_CHECK_TIME_MTIME_EQ:
+      check = (obj_ts == op_ts);
+      break;
+    case CLS_RGW_CHECK_TIME_MTIME_LT:
+      check = (obj_ts < op_ts);
+      break;
+    case CLS_RGW_CHECK_TIME_MTIME_LE:
+      check = (obj_ts <= op_ts);
+      break;
+    case CLS_RGW_CHECK_TIME_MTIME_GT:
+      check = (obj_ts > op_ts);
+      break;
+    case CLS_RGW_CHECK_TIME_MTIME_GE:
+      check = (obj_ts >= op_ts);
+      break;
+    default:
+      return -EINVAL;
+  };
+
+  if (!check) {
+    return -ECANCELED;
+  }
+
+  return 0;
+}
+
 static int rgw_bi_get_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   CLS_LOG(10, "entered %s()\n", __func__);
@@ -2761,14 +2856,6 @@ static int rgw_bi_get_obj_stat_op(cls_method_context_t hctx, bufferlist *in, buf
     return r;
   }
 
-  if (op.prefetch_data && op.conds.empty()){
-    // avoid a decode
-    entry.data = value;
-    encode(op_ret, *out);
-    return 0;
-  }
-
-  // decode is necessary
   rgw_bucket_dir_entry disk_entry;
   auto iter = value.cbegin();
   try {
@@ -2784,7 +2871,7 @@ static int rgw_bi_get_obj_stat_op(cls_method_context_t hctx, bufferlist *in, buf
       auto objv_iter = head_attrs["ceph.objclass.version"].cbegin();
       decode(objv, objv_iter);
     } catch (ceph::buffer::error& err) {
-      CLS_LOG(0, "ERROR: read_version(): failed to decode version entry", __func__);
+      CLS_LOG(0, "ERROR: %s failed to decode version entry", __func__);
       return -EIO;
     }
   }
@@ -4694,6 +4781,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_obj_store_pg_ver;
   cls_method_handle_t h_rgw_obj_check_attrs_prefix;
   cls_method_handle_t h_rgw_obj_check_mtime;
+  cls_method_handle_t h_rgw_obj_check_mtime_bi;
   cls_method_handle_t h_rgw_bi_get_op;
   cls_method_handle_t h_rgw_bi_get_obj_stat_op;
   cls_method_handle_t h_rgw_bi_put_op;
@@ -4748,6 +4836,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_OBJ_STORE_PG_VER, CLS_METHOD_WR, rgw_obj_store_pg_ver, &h_rgw_obj_store_pg_ver);
   cls_register_cxx_method(h_class, RGW_OBJ_CHECK_ATTRS_PREFIX, CLS_METHOD_RD, rgw_obj_check_attrs_prefix, &h_rgw_obj_check_attrs_prefix);
   cls_register_cxx_method(h_class, RGW_OBJ_CHECK_MTIME, CLS_METHOD_RD, rgw_obj_check_mtime, &h_rgw_obj_check_mtime);
+  cls_register_cxx_method(h_class, RGW_OBJ_CHECK_MTIME_BI, CLS_METHOD_RD, rgw_obj_check_mtime_bi, &h_rgw_obj_check_mtime_bi);
 
   cls_register_cxx_method(h_class, RGW_BI_GET, CLS_METHOD_RD, rgw_bi_get_op, &h_rgw_bi_get_op);
   cls_register_cxx_method(h_class, RGW_BI_GET_OBJ_STAT, CLS_METHOD_RD, rgw_bi_get_obj_stat_op, &h_rgw_bi_get_obj_stat_op);
