@@ -962,10 +962,11 @@ int RGWAsyncStatObj::_send_request(const DoutPrefixProvider *dpp)
       return r;
     }
 
+    bool inlined;
     RGWConcurrentGetObjState concurrentGetState(dpp, store->ctx(), ref.pool.ioctx(), ref.obj.oid,
                                                 bucket_obj.get_ref().pool.ioctx(),  bucket_obj.get_ref().obj.oid, obj.key);
     // issue concurrent ops to search rgw object state from both head object attr and bucket index entry
-    r = concurrentGetState.issue_op(psize, pmtime, pepoch, NULL, NULL, NULL);
+    r = concurrentGetState.issue_op(psize, pmtime, pepoch, NULL, NULL, NULL,&inlined);
   }else{
     return store->getRados()->raw_obj_stat(dpp, raw_obj, psize, pmtime, pepoch,
                                            nullptr, nullptr, objv_tracker, null_yield);

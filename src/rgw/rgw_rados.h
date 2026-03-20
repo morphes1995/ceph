@@ -178,6 +178,9 @@ struct RGWObjState {
   uint64_t pg_ver{false};
   uint32_t zone_short_id{0};
 
+  // rgw object state inlined in bucket index entry or not
+  bool inlined{false};
+
   /* important! don't forget to update copy constructor */
 
   RGWObjVersionTracker objv_tracker;
@@ -510,6 +513,12 @@ class RGWConcurrentGetObjState {
     int issue_get_obj_state_from_head_op(uint64_t *psize, ceph::real_time *pmtime, map<string, bufferlist> *attrs,
                                          bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
     int issue_get_obj_state_from_bi_entry_op(bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+    void parse_head_as_result(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
+                             bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+    int parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
+                                                            map<string, bufferlist> *attrs,
+                                                            bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+
 public:
     RGWConcurrentGetObjState(const DoutPrefixProvider *_dpp, CephContext *_cct,
                              librados::IoCtx& _data_io_ctx, string& _head_oid,
@@ -519,7 +528,7 @@ public:
             index_pool_io_ctx(_index_io_ctx), shard_oid(_shard_oid), obj_key(_obj_key) {  }
 
     int issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
-                 bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker);
+                 bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker, bool* inlined);
 };
 
 class RGWRados
@@ -1102,6 +1111,7 @@ public:
       bool blind;
       bool prepared{false};
       rgw_zone_set *zones_trace{nullptr};
+      uint64_t index_pool_epoch;
 
       int init_bs(const DoutPrefixProvider *dpp) {
         int r =
@@ -1138,6 +1148,10 @@ public:
 
       void set_bilog_flags(uint16_t flags) {
         bilog_flags = flags;
+      }
+
+      uint64_t  get_epoch(){
+        return index_pool_epoch;
       }
       
       void set_zones_trace(rgw_zone_set *_zones_trace) {

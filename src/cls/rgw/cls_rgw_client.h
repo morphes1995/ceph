@@ -648,6 +648,7 @@ int cls_rgw_set_bucket_resharding(librados::IoCtx& io_ctx, const std::string& oi
 int cls_rgw_clear_bucket_resharding(librados::IoCtx& io_ctx, const std::string& oid);
 int cls_rgw_get_bucket_resharding(librados::IoCtx& io_ctx, const std::string& oid,
                                   cls_rgw_bucket_instance_entry *entry);
+void cls_epoch_read(librados::ObjectWriteOperation& op, uint64_t *epoch);
 #endif
 
 #endif

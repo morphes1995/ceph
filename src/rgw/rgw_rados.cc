@@ -3191,7 +3191,7 @@ int RGWRados::Object::Write::_do_write_meta(const DoutPrefixProvider *dpp,
   if (!index_op->is_prepared()) {
     auto before_put_op_bi_prepare = ceph::coarse_real_clock::now();
     tracepoint(rgw_rados, prepare_enter, req_id.c_str());
-    r = index_op->prepare(dpp, CLS_RGW_OP_ADD, &state->write_tag, y);
+    r = index_op->prepare(dpp, CLS_RGW_OP_ADD, &state->write_tag, null_yield);
     tracepoint(rgw_rados, prepare_exit, req_id.c_str());
     auto after_put_op_bi_prepare = ceph::coarse_real_clock::now();
     ldpp_dout(dpp, 20) << "put op bi prepare time taken: "<< (after_put_op_bi_prepare - before_put_op_bi_prepare) << dendl;
@@ -3199,14 +3199,18 @@ int RGWRados::Object::Write::_do_write_meta(const DoutPrefixProvider *dpp,
       return r;
   }
 
+  bufferlist bl;
+  encode(index_op->get_epoch(), bl);
+  op.setxattr(RGW_ATTR_INDEX_POOL_EPOCH, bl); // set index pool epoch in head attr
+
   auto& ioctx = ref.pool.ioctx();
   auto before_put_op_write_head = ceph::coarse_real_clock::now();
   tracepoint(rgw_rados, operate_enter, req_id.c_str());
   r = rgw_rados_operate(dpp, ref.pool.ioctx(), ref.obj.oid, &op, null_yield);
   tracepoint(rgw_rados, operate_exit, req_id.c_str());
   auto after_put_op_write_head = ceph::coarse_real_clock::now();
-  ldpp_dout(dpp, 20) << "put op write head time taken: " << (after_put_op_write_head - before_put_op_write_head)
-                    << " oid:" << ref.obj.oid << " res: "<< r << " assume_noent " << assume_noent <<dendl;
+  ldpp_dout(dpp, 20) << "put op write head[" << ref.obj.oid << "] time taken: " << (after_put_op_write_head - before_put_op_write_head)
+                    << " oid:" << ref.obj.oid << " res: "<< r << " assume_noent " << assume_noent << " index pool epoch:"<< index_op->get_epoch() <<dendl;
   std::chrono::time_point<coarse_real_clock> before_put_op_bi_complete;
   std::chrono::time_point<coarse_real_clock> after_put_op_bi_complete;
   if (r < 0) { /* we can expect to get -ECANCELED if object was replaced under,
@@ -3380,10 +3384,10 @@ int RGWRados::Object::Write::write_meta_tiny_obj(const DoutPrefixProvider *dpp, 
                     && (!state->fake_tag);
     if (need_guard) {
       /* first verify that the object wasn't replaced under */
-      if (meta.if_nomatch == NULL || strcmp(meta.if_nomatch, "*") != 0) {
-        // new head obj create only obj_tag match with old one
-        index_op.set_cmp_eq_xattrs(RGW_ATTR_ID_TAG, state->obj_tag.c_str());
-      }
+//      if (meta.if_nomatch == NULL || strcmp(meta.if_nomatch, "*") != 0) {
+//        // new head obj create only obj_tag match with old one
+//        index_op.set_cmp_eq_xattrs(RGW_ATTR_ID_TAG, state->obj_tag.c_str());
+//      }
 
       if (meta.if_match) {
         if (strcmp(meta.if_match, "*") == 0) {
@@ -3804,7 +3808,7 @@ void RGWObjStateAioManager::wait_for_completions(int *head_ret_code, int *bi_ent
 }
 
 int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
-                                       bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker){
+                                       bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker, bool* inlined) {
   int r = 0;
   r = issue_get_obj_state_from_head_op(psize, pmtime,attrs, first_chunk, objv_tracker);
   if (r < 0) {
@@ -3817,83 +3821,134 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
   int bi_entry_ret_code = 0;
   // wait for issued op to complete
   manager.wait_for_completions(&head_ret_code, &bi_entry_ret_code);
-  ldpp_dout(dpp, 20) << "all async ops to get rgw object state finished, head oid:"  << head_oid << " shard oid :" << shard_oid << dendl;
+  ldpp_dout(dpp, 20) << "all async ops to get rgw object state finished, head oid:"
+                     << head_oid << " shard oid :" << shard_oid
+                     << "head ret code:" << head_ret_code << " bi entry ret code:" << bi_entry_ret_code << " r: " << r << dendl;
   if (r < 0) {
     return r;
   }
 
+  if (bi_entry_ret_code < 0 ) {
+    ldpp_dout(dpp, 0) << "ERROR: obj [" << head_oid << " ] error when fetch bucket index entry state " << dendl;
+    return bi_entry_ret_code;
+  }
+
+  rgw_bucket_dir_entry dirent;
+  auto iter = result_from_bi_entry.entry.data.cbegin();
+  try {
+    decode(dirent, iter);
+  } catch (buffer::error &err) {
+    return -EIO;
+  }
+
+  ldpp_dout(dpp, 20) << "bucket index entry of obj [" << head_oid << " ] inlined : " << dirent.meta.inline_head << dendl;
+
+  if (head_ret_code < 0 && head_ret_code != -ENOENT){
+    ldpp_dout(dpp, 0) << "ERROR: obj [" << head_oid << " ] error when fetch head reados object state " << dendl;
+    return head_ret_code;
+  }
+
   // all the 2 concurrent get object state op completed
   // rgw object state may both exists in both head object and bucket index entry
-  // may should always select the latest one
-  // todo  there are many cases to handle, now we always use state in head first
-  //       if head state missing, we then use state in bi entry
-  if (head_ret_code >= 0) {
-    if (objv_tracker) {
-      objv_tracker->read_version = result_from_head.objv_tracker.read_version;
+  // we should always select the latest one, consider the following 4 cases:
+
+  if(head_ret_code == -ENOENT){
+    if (!dirent.meta.inline_head){
+      // case 1: head rados object didn't exist, and head didn't inline to bucket index entry
+      return -ENOENT;
+    }else {
+      // case 2: head rados object didn't exist, meanwhile, head inlined to bucket index entry
+      *inlined = true;
+      return parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, objv_tracker);
     }
+  }
 
-    if (first_chunk) {
-      *first_chunk = result_from_head.first_chunk;
-    }
-
-    if (epoch) {
-      *epoch = data_pool_io_ctx.get_last_version();
-    }
-
-    if (psize)
-      *psize = result_from_head.size;
-    if (pmtime)
-      *pmtime = ceph::real_clock::from_timespec(result_from_head.mtime_ts);
-    if (attrs) {
-      rgw_filter_attrset(result_from_head.unfiltered_attrset, RGW_ATTR_PREFIX, attrs);
-    }
-
-  } else if (bi_entry_ret_code >= 0) {
-
-    rgw_bucket_dir_entry dirent;
-    auto iter = result_from_bi_entry.entry.data.cbegin();
-    try {
-      decode(dirent, iter);
-    } catch (buffer::error &err) {
-      return -EIO;
-    }
-
-    if (!dirent.meta.inline_head) {
-      return -EINVAL;
-    }
-
-    if (attrs) {
-      rgw_filter_attrset(dirent.meta.head_attrs, RGW_ATTR_PREFIX, attrs);
-    }
-    if (first_chunk) {
-      ceph_assert(dirent.meta.size == dirent.meta.head_data.length());
-      *first_chunk = dirent.meta.head_data;
-    }
-
-    if (psize)
-      *psize = dirent.meta.size;
-    if (pmtime)
-      *pmtime = dirent.meta.mtime;
-
-    if (objv_tracker) {
-      auto head_attrs = dirent.meta.head_attrs;
-      if (head_attrs.find("ceph.objclass.version") != head_attrs.end()) {
+  if (head_ret_code >= 0){
+    if (!dirent.meta.inline_head){
+      // case 3:  head rados object exist, no inlined bucket index entry
+      *inlined = false;
+      parse_head_as_result(psize, pmtime, epoch, attrs, first_chunk, objv_tracker);
+    }else {
+      // case 4: both head rados object and inlined bucket index entry exist
+      uint64_t epoch_in_head =0;
+      map<string, bufferlist>::iterator aiter = result_from_head.unfiltered_attrset.find(RGW_ATTR_INDEX_POOL_EPOCH);
+      if (aiter != result_from_head.unfiltered_attrset.end()) {
+        bufferlist& epoch_bl = aiter->second;
+        auto bl = epoch_bl.cbegin();
         try {
-          auto iter = head_attrs["ceph.objclass.version"].cbegin();
-          decode(objv_tracker->read_version, iter);
-        } catch (ceph::buffer::error &err) {
+          decode(epoch_in_head, bl);
+        } catch (buffer::error& err) {
+          ldpp_dout(dpp, 0) << "ERROR: couldn't decode head epoch attr for object " << head_oid  << dendl;
           return -EIO;
         }
       }
-    }
+      ceph_assert(dirent.meta.inline_index_epoch != epoch_in_head);
 
-    if (epoch) {
-      *epoch = 0; // todo ??
+      if(dirent.meta.inline_index_epoch > epoch_in_head){
+        *inlined = true;
+        return parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, objv_tracker);
+      }else{
+        *inlined = false;
+        parse_head_as_result(psize, pmtime, epoch, attrs, first_chunk, objv_tracker);
+      }
     }
+  }
 
-    return 0;
-  }else {
-    return head_ret_code;
+  return 0;
+}
+
+void RGWConcurrentGetObjState::parse_head_as_result(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
+                                                   bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker) {
+  if (objv_tracker) {
+    objv_tracker->read_version = result_from_head.objv_tracker.read_version;
+  }
+
+  if (first_chunk) {
+    *first_chunk = result_from_head.first_chunk;
+  }
+
+  if (epoch) {
+    *epoch = data_pool_io_ctx.get_last_version();
+  }
+
+  if (psize)
+    *psize = result_from_head.size;
+  if (pmtime)
+    *pmtime = ceph::real_clock::from_timespec(result_from_head.mtime_ts);
+  if (attrs) {
+    rgw_filter_attrset(result_from_head.unfiltered_attrset, RGW_ATTR_PREFIX, attrs);
+  }
+}
+
+int RGWConcurrentGetObjState::parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
+                                                        map<string, bufferlist> *attrs,
+                                                        bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker) {
+  if (attrs) {
+    rgw_filter_attrset(dirent.meta.head_attrs, RGW_ATTR_PREFIX, attrs);
+  }
+  if (first_chunk) {
+    *first_chunk = dirent.meta.head_data;
+  }
+
+  if (psize)
+    *psize = dirent.meta.head_data_size;
+  if (pmtime)
+    *pmtime = dirent.meta.mtime;
+
+  if (objv_tracker) {
+    auto head_attrs = dirent.meta.head_attrs;
+    if (head_attrs.find("ceph.objclass.version") != head_attrs.end()) {
+      try {
+        auto iter = head_attrs["ceph.objclass.version"].cbegin();
+        decode(objv_tracker->read_version, iter);
+      } catch (ceph::buffer::error &err) {
+        return -EIO;
+      }
+    }
+  }
+
+  if (epoch) {
+    *epoch = 0; // todo ??
   }
 
   return 0;
@@ -5824,11 +5879,11 @@ bool RGWRados::Object::Delete::origin_obj_existence_check(const DoutPrefixProvid
       if (fetch_origin_obj_res < 0) {
         return fetch_origin_obj_res;
       }
-
+      bool inlined;
       RGWConcurrentGetObjState concurrentGetState(dpp, target->get_store()->ctx(), ref.pool.ioctx(), ref.obj.oid,
                                                   bucket_obj.get_ref().pool.ioctx(),  bucket_obj.get_ref().obj.oid, obj.key);
       // issue concurrent ops to search rgw object state from both head object attr and bucket index entry
-      fetch_origin_obj_res = concurrentGetState.issue_op(NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL);
+      fetch_origin_obj_res = concurrentGetState.issue_op(NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL, &inlined);
     } else{
       fetch_origin_obj_res = target->get_store()->RGWRados::raw_obj_stat(dpp, raw_obj, NULL, NULL, NULL, &origin_obj_attrset, NULL, NULL, y);
     }
@@ -6196,10 +6251,11 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
       RGWConcurrentGetObjState concurrentGetState(dpp, cct, ref.pool.ioctx(), ref.obj.oid,
                                bucket_obj.get_ref().pool.ioctx(),  bucket_obj.get_ref().obj.oid, obj.key);
       // issue concurrent ops to search rgw object state from both head object attr and bucket index entry
-      r = concurrentGetState.issue_op(&s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL);
+      r = concurrentGetState.issue_op(&s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL, &s->inlined);
 
     }else{
       r = RGWRados::raw_obj_stat(dpp, raw_obj, &s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL, y);
+      s->inlined = false;
     }
   }
 
@@ -6983,6 +7039,8 @@ int RGWRados::Bucket::UpdateIndex::prepare(const DoutPrefixProvider *dpp, RGWMod
   if (r < 0) {
     return r;
   }
+
+  index_pool_epoch = bs.bucket_obj.get_last_version() -1; // get_last_version() -1 :  epoch the prepare op consumed
   prepared = true;
 
   return 0;
@@ -7137,6 +7195,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic(const DoutPrefixProvide
   ent.meta.inline_head = true;
   // inline head data
   ent.meta.head_data = head_data;
+  ent.meta.head_data_size = head_data.length();
   ent.meta.head_attrs = head_attrs;
 
   ret = store->cls_obj_complete_add_op_atomic(*bs, obj, optag,

@@ -892,6 +892,7 @@ int rgw_bucket_prepare_op(cls_method_context_t hctx, bufferlist *in, bufferlist 
   info.timestamp = real_clock::now();
   info.state = CLS_RGW_STATE_PENDING_MODIFY;
   info.op = op.op;
+  info.pending_index_epoch = cls_current_version(hctx);
   entry.pending_map.insert(pair<string, rgw_bucket_pending_info>(op.tag, info));
 
   // write out new key to disk
@@ -1076,12 +1077,14 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
    * marker */
   entry.flags &= rgw_bucket_dir_entry::FLAG_VER;
 
+  uint64_t pending_index_epoch = 0;
   if (op.tag.size()) {
     auto pinter = entry.pending_map.find(op.tag);
     if (pinter == entry.pending_map.end()) {
       CLS_LOG(1, "ERROR: couldn't find tag for pending operation\n");
       return -EINVAL;
     }
+    pending_index_epoch = pinter->second.pending_index_epoch;
     entry.pending_map.erase(pinter);
   }
 
@@ -1091,6 +1094,15 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
              op.ver.epoch && op.ver.epoch <= entry.ver.epoch) {
     CLS_LOG(1, "rgw_bucket_complete_op(): skipping request, old epoch\n");
     op.op = CLS_RGW_OP_CANCEL;
+  }
+
+  if (op.op != CLS_RGW_OP_CANCEL && op.tag.size()){
+    if(entry.meta.inline_head && entry.meta.inline_index_epoch > pending_index_epoch){
+      // inline head data writes to this entry after prepare op , we can not complete this entry, cancel this op and keep inlined entry latest
+      CLS_LOG(1, "rgw_bucket_complete_op(): skipping request, op: %d, we can not overwrite the inlined entry: "
+                 " inline_index_epoch: %ld, pending_index_epoch: %ld \n", op.op, entry.meta.inline_index_epoch, pending_index_epoch);
+      op.op = CLS_RGW_OP_CANCEL;
+    }
   }
 
   // controls whether remove_objs deletions are logged
@@ -1216,7 +1228,7 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
   }
 
   CLS_LOG(1, "rgw_bucket_complete_atomic_op(): request: op=%d name=%s instance=%s ver=%lu:%llu tag=%s "
-             "inline_head=%d head_data_len=%d head_attrs_len=%d, cmp_eq_xattrs_len=%d",
+             "inline_head=%d head_data_len=%d head_attrs_len=%ld, cmp_eq_xattrs_len=%ld",
           op.op, op.key.name.c_str(), op.key.instance.c_str(),
           (unsigned long)op.ver.pool, (unsigned long long)op.ver.epoch,
           op.tag.c_str(),
@@ -1240,19 +1252,20 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     return rc;
   }
 
-  if (already_exist){
-    for (const auto &attr: op.cmp_eq_xattrs){
-      if (entry.meta.head_attrs.find(attr.first) == entry.meta.head_attrs.end()){
-        CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): precondition failed, attr %s did not exist! \n", attr.first.c_str());
-        return -EINVAL;
-      }
-      if (entry.meta.head_attrs[attr.first].c_str() != attr.second){
-      CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): precondition failed, attr %s mismatch! \n",
-              attr.first.c_str(), attr.second.c_str(), entry.meta.head_attrs[attr.first].c_str());
-      return -EINVAL;
-      }
-    }
-  }
+/* tiny object put is an atomic operation, omit this check */
+//  if (already_exist && entry.meta.inline_head){
+//    for (const auto &attr: op.cmp_eq_xattrs){
+//      if (entry.meta.head_attrs.find(attr.first) == entry.meta.head_attrs.end()){
+//        CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): precondition failed, attr %s did not exist! \n", attr.first.c_str());
+//        return -EINVAL;
+//      }
+//      if (entry.meta.head_attrs[attr.first].c_str() != attr.second){
+//      CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): precondition failed, attr %s mismatch!, %s != %s \n",
+//              attr.first.c_str(), attr.second.c_str(), entry.meta.head_attrs[attr.first].c_str());
+//      return -EINVAL;
+//      }
+//    }
+//  }
 
   if (op.update_quota_stats){
     if (already_exist) {
@@ -1272,6 +1285,7 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
   entry.key = op.key;
 //  entry.ver = op.ver;
   entry.meta = op.meta;
+  entry.meta.inline_index_epoch = cls_current_version(hctx);
   entry.locator = op.locator;
   entry.index_ver = header.ver;
   entry.exists = true;
@@ -2784,7 +2798,7 @@ static int rgw_bi_get_obj_stat_op(cls_method_context_t hctx, bufferlist *in, buf
       auto objv_iter = head_attrs["ceph.objclass.version"].cbegin();
       decode(objv, objv_iter);
     } catch (ceph::buffer::error& err) {
-      CLS_LOG(0, "ERROR: read_version(): failed to decode version entry", __func__);
+      CLS_LOG(0, "ERROR: %s failed to decode version entry", __func__);
       return -EIO;
     }
   }

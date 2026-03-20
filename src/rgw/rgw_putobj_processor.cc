@@ -318,12 +318,24 @@ int AtomicObjectProcessor::complete(size_t accounted_size,
     }
     return r;
   }
+  if (store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
+    RGWObjState *astate;
+    r = head_obj->get_obj_state(dpp, &obj_ctx, *bucket, &astate, y);
+    if (r < 0) {
+      return r;
+    }
 
-  if (actual_size <= get_head_chunk_size() && store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
+    if (actual_size <= get_head_chunk_size()
+       // if the latest rgw obj head is inlined in bucket index entry
+       // the latter head_obj should always inline too,  sine we can not overwrite the head based on  state from bucket index entry
+       || astate->inlined){
       // small object write
       r = obj_op->write_meta_tiny_obj(dpp, actual_size, accounted_size, y);
-  }else {
+    }else{
       r = obj_op->write_meta(dpp, actual_size, accounted_size, y);
+    }
+  }else {
+    r = obj_op->write_meta(dpp, actual_size, accounted_size, y);
   }
 
   if (r < 0) {
