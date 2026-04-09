@@ -98,7 +98,13 @@ public:
   }
   virtual int check_quota(const rgw_user& bucket_owner, rgw_bucket& bucket,
                           RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota,
-			  uint64_t num_objs, uint64_t size, optional_yield y) = 0;
+			  uint64_t num_objs, uint64_t size, bool tiny_object_inline, int stats_refresh_interval, optional_yield y) = 0;
+
+  virtual bool reach_tiny_obj_inline_max_quota_threshold(const rgw_user& user,
+                                                         rgw_bucket& bucket,
+                                                         RGWQuotaInfo& bucket_quota,
+                                                         bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                         optional_yield y) = 0;
 
   virtual void check_bucket_shards(uint64_t max_objs_per_shard, uint64_t num_shards,
 				   uint64_t num_objs, bool& need_resharding, uint32_t *suggested_num_shards) = 0;

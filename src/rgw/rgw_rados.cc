@@ -5977,7 +5977,7 @@ bool RGWRados::Object::Delete::origin_obj_existence_check(const DoutPrefixProvid
                                                           optional_yield y) {
     map<string, bufferlist> origin_obj_attrset;
     int fetch_origin_obj_res;
-    if (target->get_store()->cct->_conf->rgw_enable_tiny_obj_atomic_put){
+    if (!target->get_bucket_info().tiny_obj_inline_disabled()){
 
       int r = 0;
       RGWSI_RADOS::Obj bucket_obj;
@@ -6347,7 +6347,7 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
   int r = -ENOENT;
 
   if (!assume_noent) {
-    if (cct->_conf->rgw_enable_tiny_obj_atomic_put && obj.key.get_ns() != "multipart"){
+    if (!bucket_info.tiny_obj_inline_disabled() && obj.key.get_ns() != "multipart"){
       RGWSI_RADOS::Obj bucket_obj;
       int shard_id = -1;
       r = store->svc()->bi_rados->open_bucket_index_shard(dpp, bucket_info,
@@ -10656,15 +10656,23 @@ int RGWRados::add_bucket_to_reshard(const DoutPrefixProvider *dpp, const RGWBuck
 }
 
 int RGWRados::check_quota(const rgw_user& bucket_owner, rgw_bucket& bucket,
-                          RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota,
-			  uint64_t obj_size, optional_yield y,
+                          RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota, uint64_t obj_size,
+                          bool tiny_object_inline, int stats_refresh_interval,
+                          optional_yield y,
 			  bool check_size_only)
 {
   // if we only check size, then num_objs will set to 0
   if(check_size_only)
-    return quota_handler->check_quota(bucket_owner, bucket, user_quota, bucket_quota, 0, obj_size, y);
+    return quota_handler->check_quota(bucket_owner, bucket, user_quota, bucket_quota, 0, obj_size, tiny_object_inline, stats_refresh_interval, y);
 
-  return quota_handler->check_quota(bucket_owner, bucket, user_quota, bucket_quota, 1, obj_size, y);
+  return quota_handler->check_quota(bucket_owner, bucket, user_quota, bucket_quota, 1, obj_size, tiny_object_inline, stats_refresh_interval, y);
+}
+bool RGWRados::reach_tiny_obj_inline_max_quota_threshold(const rgw_user& bucket_owner, rgw_bucket& bucket, RGWQuotaInfo& bucket_quota,
+                                                        bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                        optional_yield y)
+{
+  return quota_handler->reach_tiny_obj_inline_max_quota_threshold(bucket_owner, bucket, bucket_quota,
+                                                                  tiny_object_inline, stats_refresh_interval, max_quota_pct_to_allow_inline, y);
 }
 
 int RGWRados::get_target_shard_id(const rgw::bucket_index_normal_layout& layout, const string& obj_key,

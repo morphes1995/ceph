@@ -141,6 +141,9 @@ void usage()
   cout << "  bucket trash disable       disable bucket trash data protection\n";
   cout << "  bucket trash enable        enable bucket trash data protection\n";
   cout << "  bucket trash update        update bucket trash params\n";
+  cout << "  bucket obj inline enable   enable bucket tiny object inline feature\n";
+  cout << "  bucket obj inline disable  disable bucket tiny object inline feature\n";
+  cout << "  bucket obj inline config   config bucket tiny object inline feature parameters\n";
   cout << "  bucket radoslist           list rados objects backing bucket's objects\n";
   cout << "  bi get                     retrieve bucket index object entries\n";
   cout << "  bi put                     store bucket index object entries\n";
@@ -402,6 +405,9 @@ void usage()
   cout << "   --bypass-trash            force rm object, bypass bucket trash bin \n";
   cout << "   --trash_expired_days      reserve days for deleted objs in trash bin \n";
   cout << "                             object deletions by not involving GC\n";
+  cout << "   --stats-refresh-interval  interval to refresh rgw stats cache from rados\n";
+  cout << "   --max-quota-pct           max percent of quota usage to allow tiny object inline\n";
+  cout << "   --tiny-obj-size_kb           object smaller than this will inline to bucket index entry\n";
   cout << "   --inconsistent-index      when specified with bucket deletion and bypass-gc set to true,\n";
   cout << "                             ignores bucket index consistency\n";
   cout << "   --min-rewrite-size        min object size for bucket rewrite (default 4M)\n";
@@ -622,6 +628,9 @@ enum class OPT {
   BUCKET_TRASH_DISABLE,
   BUCKET_TRASH_ENABLE,
   BUCKET_TRASH_UPDATE,
+  BUCKET_OBJ_INLINE_ENABLE,
+  BUCKET_OBJ_INLINE_DISABLE,
+  BUCKET_OBJ_INLINE_CONFIG,
   BUCKET_RM,
   BUCKET_REWRITE,
   BUCKET_RESHARD,
@@ -831,6 +840,9 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket trash disable", OPT::BUCKET_TRASH_DISABLE },
   { "bucket trash enable", OPT::BUCKET_TRASH_ENABLE },
   { "bucket trash update", OPT::BUCKET_TRASH_UPDATE },
+  { "bucket obj inline enable", OPT::BUCKET_OBJ_INLINE_ENABLE },
+  { "bucket obj inline disable", OPT::BUCKET_OBJ_INLINE_DISABLE },
+  { "bucket obj inline config", OPT::BUCKET_OBJ_INLINE_CONFIG },
   { "bucket rm", OPT::BUCKET_RM },
   { "bucket rewrite", OPT::BUCKET_REWRITE },
   { "bucket reshard", OPT::BUCKET_RESHARD },
@@ -3155,6 +3167,11 @@ int main(int argc, const char **argv)
   int bypass_gc = false;
   int bypass_trash = false;
   int trash_expired_days = -1;
+
+  int stats_refresh_interval = -1;
+  int max_quota_pct = -1;
+  int tiny_obj_size_kb = -1;
+
   int warnings_only = false;
   int inconsistent_index = false;
 
@@ -3477,6 +3494,36 @@ int main(int argc, const char **argv)
          cerr << "ERROR: trash_expired_days must >= 0" << std::endl;
          return EINVAL;
      }
+    }else if (ceph_argparse_witharg(args, i, &val, "--stats-refresh-interval", (char*)NULL)) {
+      stats_refresh_interval = (int)strict_strtol(val.c_str(), 10, &err);
+      if (!err.empty()) {
+        cerr << "ERROR: failed to parse stats_refresh_interval: " << err << std::endl;
+        return EINVAL;
+      }
+      if (stats_refresh_interval < 0){
+        cerr << "ERROR: stats_refresh_interval must >= 0" << std::endl;
+        return EINVAL;
+      }
+    }else if (ceph_argparse_witharg(args, i, &val, "--max-quota-pct", (char*)NULL)) {
+      max_quota_pct = (int)strict_strtol(val.c_str(), 10, &err);
+      if (!err.empty()) {
+        cerr << "ERROR: failed to parse max_quota_pct: " << err << std::endl;
+        return EINVAL;
+      }
+      if (max_quota_pct < 0){
+        cerr << "ERROR: max_quota_pct must >= 0" << std::endl;
+        return EINVAL;
+      }
+    }else if (ceph_argparse_witharg(args, i, &val, "--tiny-obj-size-kb", (char*)NULL)) {
+      tiny_obj_size_kb = (int) strict_strtol(val.c_str(), 10, &err);
+      if (!err.empty()) {
+        cerr << "ERROR: failed to parse tiny_obj_size_kb: " << err << std::endl;
+        return EINVAL;
+      }
+      if (tiny_obj_size_kb < 0) {
+        cerr << "ERROR: tiny_obj_size_kb must >= 0" << std::endl;
+        return EINVAL;
+      }
     }else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &inconsistent_index, NULL, "--inconsistent-index", (char*)NULL)) {
@@ -8182,6 +8229,47 @@ next:
               return -ret;
           }
       }
+  }
+
+  if ((opt_cmd == OPT::BUCKET_OBJ_INLINE_ENABLE) || (opt_cmd == OPT::BUCKET_OBJ_INLINE_DISABLE)) {
+    if (bucket_name.empty()) {
+      cerr << "ERROR: bucket not specified" << std::endl;
+      return EINVAL;
+    }
+    if (opt_cmd == OPT::BUCKET_OBJ_INLINE_DISABLE) {
+      bucket_op.set_obj_inline_enabled(false);
+    } else {
+      bucket_op.set_obj_inline_enabled(true);
+    }
+
+    bucket_op.set_tenant(tenant);
+    string err_msg;
+    ret = RGWBucketAdminOp::set_obj_inline(store, bucket_op, dpp(), &err_msg);
+    if (ret < 0) {
+      cerr << err_msg << std::endl;
+      return -ret;
+    }
+  }
+
+  if (opt_cmd == OPT::BUCKET_OBJ_INLINE_CONFIG) {
+    if (bucket_name.empty()) {
+      cerr << "ERROR: bucket not specified" << std::endl;
+      return EINVAL;
+    }
+    if (stats_refresh_interval >= 0 )
+      bucket_op.set_stats_refresh_interval(stats_refresh_interval);
+    if (max_quota_pct >= 0 )
+      bucket_op.set_max_quota_pct(max_quota_pct);
+    if (tiny_obj_size_kb >= 0 )
+      bucket_op.set_tiny_obj_size_kb(tiny_obj_size_kb);
+
+    bucket_op.set_tenant(tenant);
+    string err_msg;
+    ret = RGWBucketAdminOp::obj_inline_config(store, bucket_op, dpp(), &err_msg);
+    if (ret < 0) {
+      cerr << err_msg << std::endl;
+      return -ret;
+    }
   }
 
   if (opt_cmd == OPT::BUCKET_SYNC_INFO) {

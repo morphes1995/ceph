@@ -319,7 +319,10 @@ int AtomicObjectProcessor::complete(size_t accounted_size,
     return r;
   }
 
-  if (actual_size <= get_head_chunk_size() && store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
+  if (bucket->is_tiny_obj_inline_enabled()
+      && actual_size <= bucket->get_tiny_obj_size_threshold()
+      && !bucket->reach_tiny_obj_inline_max_quota_threshold(y))
+  {
     // small object write
     r = obj_op->write_meta_tiny_obj(dpp, actual_size, accounted_size, y);
   }else {

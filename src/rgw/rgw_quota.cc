@@ -81,13 +81,13 @@ public:
     async_refcount->put_wait(); /* wait for all pending async requests to complete */
   }
 
-  int get_stats(const rgw_user& user, const rgw_bucket& bucket, RGWStorageStats& stats, optional_yield y,
+  int get_stats(const rgw_user& user, const rgw_bucket& bucket, RGWStorageStats& stats, bool tiny_object_inline, int stats_refresh_interval, optional_yield y,
                 const DoutPrefixProvider* dpp);
   void adjust_stats(const rgw_user& user, rgw_bucket& bucket, int objs_delta, uint64_t added_bytes, uint64_t removed_bytes);
 
-  void set_stats(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, RGWStorageStats& stats);
-  int async_refresh(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs);
-  void async_refresh_response(const rgw_user& user, rgw_bucket& bucket, RGWStorageStats& stats);
+  void set_stats(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, RGWStorageStats& stats, bool tiny_object_inline, int stats_refresh_interval);
+  int async_refresh(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, bool tiny_object_inline, int stats_refresh_interval);
+  void async_refresh_response(const rgw_user& user, rgw_bucket& bucket, RGWStorageStats& stats, bool tiny_object_inline, int stats_refresh_interval);
   void async_refresh_fail(const rgw_user& user, rgw_bucket& bucket);
 
   class AsyncRefreshHandler {
@@ -102,11 +102,11 @@ public:
     virtual void drop_reference() = 0;
   };
 
-  virtual AsyncRefreshHandler *allocate_refresh_handler(const rgw_user& user, const rgw_bucket& bucket) = 0;
+  virtual AsyncRefreshHandler *allocate_refresh_handler(const rgw_user& user, const rgw_bucket& bucket, bool tiny_object_inline, int stats_refresh_interval) = 0;
 };
 
 template<class T>
-int RGWQuotaCache<T>::async_refresh(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs)
+int RGWQuotaCache<T>::async_refresh(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, bool tiny_object_inline, int stats_refresh_interval)
 {
   /* protect against multiple updates */
   StatsAsyncTestSet test_update;
@@ -118,7 +118,7 @@ int RGWQuotaCache<T>::async_refresh(const rgw_user& user, const rgw_bucket& buck
   async_refcount->get();
 
 
-  AsyncRefreshHandler *handler = allocate_refresh_handler(user, bucket);
+  AsyncRefreshHandler *handler = allocate_refresh_handler(user, bucket, tiny_object_inline, stats_refresh_interval);
 
   int ret = handler->init_fetch();
   if (ret < 0) {
@@ -139,7 +139,7 @@ void RGWQuotaCache<T>::async_refresh_fail(const rgw_user& user, rgw_bucket& buck
 }
 
 template<class T>
-void RGWQuotaCache<T>::async_refresh_response(const rgw_user& user, rgw_bucket& bucket, RGWStorageStats& stats)
+void RGWQuotaCache<T>::async_refresh_response(const rgw_user& user, rgw_bucket& bucket, RGWStorageStats& stats, bool tiny_object_inline, int stats_refresh_interval)
 {
   ldout(store->ctx(), 20) << "async stats refresh response for bucket=" << bucket << dendl;
 
@@ -147,30 +147,39 @@ void RGWQuotaCache<T>::async_refresh_response(const rgw_user& user, rgw_bucket& 
 
   map_find(user, bucket, qs);
 
-  set_stats(user, bucket, qs, stats);
+  set_stats(user, bucket, qs, stats, tiny_object_inline, stats_refresh_interval);
 
   async_refcount->put();
 }
 
 template<class T>
-void RGWQuotaCache<T>::set_stats(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, RGWStorageStats& stats)
+void RGWQuotaCache<T>::set_stats(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, RGWStorageStats& stats,
+                                 bool tiny_object_inline, int stats_refresh_interval)
 {
   qs.stats = stats;
   qs.expiration = ceph_clock_now();
   qs.async_refresh_time = qs.expiration;
-  qs.expiration += store->ctx()->_conf->rgw_bucket_quota_ttl;
-  qs.async_refresh_time += store->ctx()->_conf->rgw_bucket_quota_ttl / 2;
+  ldout(store->ctx(), 20) << "quota cache stats update, bucket: " << bucket.name
+                          << " stats num objects: :" << stats.num_objects << "stats size: "<< stats.size << dendl;
+  if (tiny_object_inline){
+    qs.expiration += stats_refresh_interval;
+    qs.async_refresh_time += stats_refresh_interval / 2;
+  }else{
+    qs.expiration += store->ctx()->_conf->rgw_bucket_quota_ttl;
+    qs.async_refresh_time += store->ctx()->_conf->rgw_bucket_quota_ttl / 2;
+  }
 
   map_add(user, bucket, qs);
 }
 
 template<class T>
-int RGWQuotaCache<T>::get_stats(const rgw_user& user, const rgw_bucket& bucket, RGWStorageStats& stats, optional_yield y, const DoutPrefixProvider* dpp) {
+int RGWQuotaCache<T>::get_stats(const rgw_user& user, const rgw_bucket& bucket, RGWStorageStats& stats,
+                                bool tiny_object_inline, int stats_refresh_interval, optional_yield y, const DoutPrefixProvider* dpp) {
   RGWQuotaCacheStats qs;
   utime_t now = ceph_clock_now();
   if (map_find(user, bucket, qs)) {
     if (qs.async_refresh_time.sec() > 0 && now >= qs.async_refresh_time) {
-      int r = async_refresh(user, bucket, qs);
+      int r = async_refresh(user, bucket, qs, tiny_object_inline, stats_refresh_interval);
       if (r < 0) {
         ldout(store->ctx(), 0) << "ERROR: quota async refresh returned ret=" << r << dendl;
 
@@ -188,7 +197,7 @@ int RGWQuotaCache<T>::get_stats(const rgw_user& user, const rgw_bucket& bucket, 
   if (ret < 0 && ret != -ENOENT)
     return ret;
 
-  set_stats(user, bucket, qs, stats);
+  set_stats(user, bucket, qs, stats, tiny_object_inline, stats_refresh_interval);
 
   return 0;
 }
@@ -248,11 +257,13 @@ void RGWQuotaCache<T>::adjust_stats(const rgw_user& user, rgw_bucket& bucket, in
 class BucketAsyncRefreshHandler : public RGWQuotaCache<rgw_bucket>::AsyncRefreshHandler,
                                   public RGWGetBucketStats_CB {
   rgw_user user;
+  bool tiny_object_inline;
+  int stats_refresh_interval;
 public:
   BucketAsyncRefreshHandler(rgw::sal::RGWRadosStore *_store, RGWQuotaCache<rgw_bucket> *_cache,
-                            const rgw_user& _user, const rgw_bucket& _bucket) :
+                            const rgw_user& _user, const rgw_bucket& _bucket, bool _tiny_object_inline, int _stats_refresh_interval) :
                                       RGWQuotaCache<rgw_bucket>::AsyncRefreshHandler(_store, _cache),
-                                      RGWGetBucketStats_CB(_bucket), user(_user) {}
+                                      RGWGetBucketStats_CB(_bucket), user(_user), tiny_object_inline(_tiny_object_inline), stats_refresh_interval(_stats_refresh_interval){}
 
   void drop_reference() override { put(); }
   void handle_response(int r) override;
@@ -303,7 +314,7 @@ void BucketAsyncRefreshHandler::handle_response(const int r)
     bs.num_objects += s.num_objects;
   }
 
-  cache->async_refresh_response(user, bucket, bs);
+  cache->async_refresh_response(user, bucket, bs, tiny_object_inline, stats_refresh_interval);
 }
 
 class RGWBucketStatsCache : public RGWQuotaCache<rgw_bucket> {
@@ -326,8 +337,8 @@ public:
   explicit RGWBucketStatsCache(rgw::sal::RGWRadosStore *_store) : RGWQuotaCache<rgw_bucket>(_store, _store->ctx()->_conf->rgw_bucket_quota_cache_size) {
   }
 
-  AsyncRefreshHandler *allocate_refresh_handler(const rgw_user& user, const rgw_bucket& bucket) override {
-    return new BucketAsyncRefreshHandler(store, this, user, bucket);
+  AsyncRefreshHandler *allocate_refresh_handler(const rgw_user& user, const rgw_bucket& bucket, bool tiny_object_inline, int stats_refresh_interval) override {
+    return new BucketAsyncRefreshHandler(store, this, user, bucket, tiny_object_inline, stats_refresh_interval);
   }
 };
 
@@ -407,7 +418,7 @@ void UserAsyncRefreshHandler::handle_response(int r)
     return;
   }
 
-  cache->async_refresh_response(user, bucket, stats);
+  cache->async_refresh_response(user, bucket, stats, false, 0);
 }
 
 class RGWUserStatsCache : public RGWQuotaCache<rgw_user> {
@@ -564,7 +575,7 @@ public:
     stop();
   }
 
-  AsyncRefreshHandler *allocate_refresh_handler(const rgw_user& user, const rgw_bucket& bucket) override {
+  AsyncRefreshHandler *allocate_refresh_handler(const rgw_user& user, const rgw_bucket& bucket, bool tiny_object_inline, int stats_refresh_interval) override {
     return new UserAsyncRefreshHandler(dpp, store, this, user, bucket);
   }
 
@@ -899,7 +910,7 @@ public:
 		  RGWQuotaInfo& user_quota,
 		  RGWQuotaInfo& bucket_quota,
 		  uint64_t num_objs,
-		  uint64_t size, optional_yield y) override {
+		  uint64_t size, bool tiny_object_inline, int stats_refresh_interval, optional_yield y) override {
 
     if (!bucket_quota.enabled && !user_quota.enabled) {
       return 0;
@@ -915,7 +926,7 @@ public:
     const DoutPrefix dp(store->ctx(), dout_subsys, "rgw quota handler: ");
     if (bucket_quota.enabled) {
       RGWStorageStats bucket_stats;
-      int ret = bucket_stats_cache.get_stats(user, bucket, bucket_stats, y, &dp);
+      int ret = bucket_stats_cache.get_stats(user, bucket, bucket_stats, tiny_object_inline, stats_refresh_interval, y, &dp);
       if (ret < 0) {
         return ret;
       }
@@ -927,7 +938,7 @@ public:
 
     if (user_quota.enabled) {
       RGWStorageStats user_stats;
-      int ret = user_stats_cache.get_stats(user, bucket, user_stats, y, &dp);
+      int ret = user_stats_cache.get_stats(user, bucket, user_stats, tiny_object_inline, stats_refresh_interval, y, &dp);
       if (ret < 0) {
         return ret;
       }
@@ -937,6 +948,36 @@ public:
       }
     }
     return 0;
+  }
+
+  bool reach_tiny_obj_inline_max_quota_threshold(const rgw_user& user,
+                                                 rgw_bucket& bucket,
+                                                 RGWQuotaInfo& bucket_quota, bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                 optional_yield y) override {
+    if (!bucket_quota.enabled) {
+      return false;
+    }
+    const DoutPrefix dp(store->ctx(), dout_subsys, "rgw quota handler: ");
+    RGWStorageStats bucket_stats;
+    int ret = bucket_stats_cache.get_stats(user, bucket, bucket_stats, tiny_object_inline, stats_refresh_interval, y, &dp);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << __func__ << ": error: " << ret << dendl;
+      return true;
+    }
+    ldout(store->ctx(), 20) << __func__ << "bucket_stats num_objects:  " << bucket_stats.num_objects << " bucket_stats size:  " << bucket_stats.size << dendl;
+
+    bool obj_num_reached = false;
+    if (bucket_quota.max_objects > 0 && bucket_stats.num_objects > bucket_quota.max_objects * ((double)max_quota_pct_to_allow_inline/100)){
+      obj_num_reached = true;
+    }
+
+    bool obj_size_reached = false;
+    if (bucket_quota.max_size > 0 && bucket_stats.size > bucket_quota.max_size * ((double)max_quota_pct_to_allow_inline/100)){
+      obj_size_reached = true;
+    }
+
+    ldout(store->ctx(), 20) << __func__ << "bucket:  " << bucket.name << " result:  " << (obj_num_reached || obj_size_reached) << dendl;
+    return obj_num_reached || obj_size_reached;
   }
 
   void update_stats(const rgw_user& user, rgw_bucket& bucket, int obj_delta, uint64_t added_bytes, uint64_t removed_bytes) override {

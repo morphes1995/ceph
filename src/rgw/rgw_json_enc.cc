@@ -803,6 +803,10 @@ void RGWBucketInfo::dump(Formatter *f) const
     encode_json("sync_policy", *sync_policy, f);
   }
   encode_json("trash_obj_expired_days", trash_obj_expired_days, f);
+
+  encode_json("bucket_stats_refresh_interval", bucket_stats_refresh_interval, f);
+  encode_json("max_quota_pct_to_allow_inline", max_quota_pct_to_allow_inline, f);
+  encode_json("tiny_object_size_kb_threshold", tiny_object_size_kb_threshold, f);
 }
 
 void RGWBucketInfo::decode_json(JSONObj *obj) {
@@ -850,6 +854,10 @@ void RGWBucketInfo::decode_json(JSONObj *obj) {
   int expired_days = 0;
   JSONDecoder::decode_json("trash_obj_expired_days", expired_days, obj);
   trash_obj_expired_days = expired_days;
+
+  JSONDecoder::decode_json("bucket_stats_refresh_interval", bucket_stats_refresh_interval, obj);
+  JSONDecoder::decode_json("max_quota_pct_to_allow_inline", max_quota_pct_to_allow_inline, obj);
+  JSONDecoder::decode_json("tiny_object_size_kb_threshold", tiny_object_size_kb_threshold, obj);
 }
 
 void rgw_sync_directional_rule::dump(Formatter *f) const

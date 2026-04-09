@@ -1171,6 +1171,76 @@ int RGWBucket::trash_update(RGWBucketAdminOpState &op_state, const DoutPrefixPro
     return r;
 }
 
+int RGWBucket::set_obj_inline(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg) {
+  rgw_bucket bucket = op_state.get_bucket();
+  RGWBucketInfo bucket_info;
+  map<string, bufferlist> attrs;
+  int r = store->getRados()->get_bucket_info(store->svc(), bucket.tenant, bucket.name, bucket_info, NULL, null_yield,
+                                             dpp, &attrs);
+  if (r < 0) {
+    set_err_msg(err_msg, "could not get bucket info for bucket=" + bucket.name + ": " + cpp_strerror(-r));
+    return r;
+  }
+
+  if (op_state.obj_inline_enabled) {
+    if (bucket_info.versioned()){
+      set_err_msg(err_msg, "could not enable tiny object inline feature, because of bucket was versioned!");
+      return -EINVAL;
+    }
+    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_DISABLED) ;
+    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_ENABLED;
+  } else {
+    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_ENABLED) ;
+    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_DISABLED;
+  }
+
+  // update bucket info
+  r = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &attrs, dpp);
+  if (r < 0) {
+    set_err_msg(err_msg, "ERROR: failed writing bucket instance info: " + cpp_strerror(-r));
+    return r;
+  }
+
+  return 0;
+}
+int RGWBucket::obj_inline_config(RGWBucketAdminOpState &op_state, const DoutPrefixProvider *dpp, std::string *err_msg) {
+  rgw_bucket bucket = op_state.get_bucket();
+  RGWBucketInfo bucket_info;
+  map<string, bufferlist> attrs;
+  int r = store->getRados()->get_bucket_info(store->svc(), bucket.tenant, bucket.name, bucket_info, NULL, null_yield,
+                                             dpp, &attrs);
+  if (r < 0) {
+    set_err_msg(err_msg, "could not get bucket info for bucket=" + bucket.name + ": " + cpp_strerror(-r));
+    return r;
+  }
+
+  if (op_state.stats_refresh_interval > 0)
+    bucket_info.bucket_stats_refresh_interval = op_state.stats_refresh_interval;
+  if (op_state.max_quota_pct > 0){
+    if(op_state.max_quota_pct > 100){
+      set_err_msg(err_msg, "max_quota_pct can not gt 100 !");
+      return -EINVAL;
+    }
+    bucket_info.max_quota_pct_to_allow_inline = op_state.max_quota_pct;
+  }
+  if (op_state.tiny_obj_size_kb > 0) {
+    if (op_state.tiny_obj_size_kb << 10 > store->ctx()->_conf->rgw_max_chunk_size){
+      set_err_msg(err_msg, "tiny_obj_size_kb can not gt rgw_max_chunk_size !");
+      return -EINVAL;
+    }
+    bucket_info.tiny_object_size_kb_threshold = op_state.tiny_obj_size_kb;
+  }
+
+  // update bucket info
+  r = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &attrs, dpp);
+  if (r < 0) {
+    set_err_msg(err_msg, "ERROR: failed writing bucket instance info: " + cpp_strerror(-r));
+    return r;
+  }
+
+  return 0;
+}
+
 
 int RGWBucket::policy_bl_to_stream(bufferlist& bl, ostream& o)
 {
@@ -1432,6 +1502,25 @@ int RGWBucketAdminOp::trash_update(rgw::sal::RGWRadosStore *store, RGWBucketAdmi
     return bucket.trash_update(op_state, dpp, err_msg);
 }
 
+int RGWBucketAdminOp::set_obj_inline(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg)
+{
+  RGWBucket bucket;
+
+  int ret = bucket.init(store, op_state, null_yield, dpp);
+  if (ret < 0)
+    return ret;
+  return bucket.set_obj_inline(op_state, dpp, err_msg);
+}
+int RGWBucketAdminOp::obj_inline_config(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg)
+{
+  RGWBucket bucket;
+
+  int ret = bucket.init(store, op_state, null_yield, dpp);
+  if (ret < 0)
+    return ret;
+  return bucket.obj_inline_config(op_state, dpp, err_msg);
+}
+
 static int bucket_stats(rgw::sal::RGWRadosStore *store,
 			const std::string& tenant_name,
 			const std::string& bucket_name,
@@ -1486,6 +1575,11 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   encode_json("bucket_quota", bucket_info.quota, formatter);
   formatter->dump_bool("trash enabled", bucket_info.trash_bin_enabled());
   formatter->dump_int("trash obj expired days", bucket_info.trash_obj_expired_days);
+
+  formatter->dump_bool("tiny_object_inline_enabled", bucket_info.tiny_obj_inline_enabled());
+  formatter->dump_int("tiny_object_size_threshold_kb", bucket_info.tiny_object_size_kb_threshold);
+  formatter->dump_int("bucket_stats_refresh_interval_sec", bucket_info.bucket_stats_refresh_interval);
+  formatter->dump_int("max_quota_allowed_pct", bucket_info.max_quota_pct_to_allow_inline);
 
   // bucket tags
   auto iter = attrs.find(RGW_ATTR_TAGS);

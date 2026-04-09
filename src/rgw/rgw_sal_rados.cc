@@ -319,7 +319,12 @@ int RGWRadosBucket::check_quota(RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_q
 				optional_yield y, bool check_size_only)
 {
     return store->getRados()->check_quota(info.owner, get_key(),
-					  user_quota, bucket_quota, obj_size, y, check_size_only);
+					  user_quota, bucket_quota, obj_size, info.tiny_obj_inline_enabled(), info.bucket_stats_refresh_interval, y, check_size_only);
+}
+
+bool RGWRadosBucket::reach_tiny_obj_inline_max_quota_threshold(optional_yield y){
+  return store->getRados()->reach_tiny_obj_inline_max_quota_threshold(info.owner, get_key(), info.quota,
+                                                                      info.tiny_obj_inline_enabled(), info.bucket_stats_refresh_interval, info.max_quota_pct_to_allow_inline, y);
 }
 
 int RGWRadosBucket::set_instance_attrs(const DoutPrefixProvider *dpp, RGWAttrs& attrs, optional_yield y)

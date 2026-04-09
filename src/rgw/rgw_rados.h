@@ -1757,8 +1757,11 @@ public:
   int fix_tail_obj_locator(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, rgw_obj_key& key, bool fix, bool *need_fix, optional_yield y);
 
   int check_quota(const rgw_user& bucket_owner, rgw_bucket& bucket,
-                  RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota, uint64_t obj_size,
+                  RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_quota, uint64_t obj_size, bool tiny_object_inline, int stats_refresh_interval,
 		  optional_yield y, bool check_size_only = false);
+  bool reach_tiny_obj_inline_max_quota_threshold(const rgw_user& bucket_owner, rgw_bucket& bucket, RGWQuotaInfo& bucket_quota,
+                                                bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                optional_yield y);
 
   int check_bucket_shards(const RGWBucketInfo& bucket_info, const rgw_bucket& bucket,
 			  uint64_t num_objs, const DoutPrefixProvider *dpp);

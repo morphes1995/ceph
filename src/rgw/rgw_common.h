@@ -995,6 +995,9 @@ enum RGWBucketFlags {
   BUCKET_MFA_ENABLED = 0X10,
   BUCKET_OBJ_LOCK_ENABLED = 0X20,
   BUCKET_TRASH_ENABLED = 0X40,
+  BUCKET_TINY_OBJECT_INLINE_ENABLED = 0X80,
+  BUCKET_TINY_OBJECT_INLINE_DISABLING = 0X100,
+  BUCKET_TINY_OBJECT_INLINE_DISABLED = 0X200,
 };
 
 class RGWSI_Zone;
@@ -1041,6 +1044,10 @@ struct RGWBucketInfo {
 
   int trash_obj_expired_days{0}; // 0 means obj in trash bin never expired
 
+  int bucket_stats_refresh_interval{10};
+  int max_quota_pct_to_allow_inline{80};
+  int tiny_object_size_kb_threshold{128};
+
   void encode(bufferlist& bl) const;
   void decode(bufferlist::const_iterator& bl);
 
@@ -1056,6 +1063,8 @@ struct RGWBucketInfo {
   bool datasync_flag_enabled() const { return (flags & BUCKET_DATASYNC_DISABLED) == 0; }
   bool obj_lock_enabled() const { return (flags & BUCKET_OBJ_LOCK_ENABLED) != 0; }
   bool trash_bin_enabled() const { return (flags & BUCKET_TRASH_ENABLED) != 0; }
+  bool tiny_obj_inline_enabled() const { return (flags & BUCKET_TINY_OBJECT_INLINE_ENABLED) != 0; }
+  bool tiny_obj_inline_disabled() const { return (flags & BUCKET_TINY_OBJECT_INLINE_DISABLED) != 0; }
 
   bool has_swift_versioning() const {
     /* A bucket may be versioned through one mechanism only. */

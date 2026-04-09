@@ -943,7 +943,7 @@ int RGWAsyncStatObj::_send_request(const DoutPrefixProvider *dpp)
 {
   rgw_raw_obj raw_obj;
   store->getRados()->obj_to_raw(bucket_info.placement_rule, obj, &raw_obj);
-  if (store->ctx()->_conf->rgw_enable_tiny_obj_atomic_put){
+  if (!bucket_info.tiny_obj_inline_disabled()){
     int r = 0;
     RGWSI_RADOS::Obj bucket_obj;
     int shard_id = -1;
