@@ -1144,13 +1144,17 @@ struct RGWStorageStats
   uint64_t num_objects;
   uint64_t size_utilized{0}; //< size after compression, encryption
   bool dump_utilized;        // whether dump should include utilized values
+  uint64_t inlined_entry_num;
+  uint64_t inlined_total_entry_size;
 
   RGWStorageStats(bool _dump_utilized=true)
     : category(RGWObjCategory::None),
       size(0),
       size_rounded(0),
       num_objects(0),
-      dump_utilized(_dump_utilized)
+      dump_utilized(_dump_utilized),
+      inlined_entry_num(0),
+      inlined_total_entry_size(0)
   {}
 
   void dump(Formatter *f) const;

@@ -240,6 +240,16 @@ void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("versioned_epoch", versioned_epoch, obj);
 }
 
+void rgw_bucket_inlined_entry_index::dump(Formatter *f) const
+{
+  encode_json("entry_size", entry_size, f);
+  encode_json("delete_marker", delete_marker , f);
+}
+void rgw_bucket_inlined_entry_index::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("entry_size", entry_size, obj);
+  JSONDecoder::decode_json("delete_marker", delete_marker , obj);
+}
+
 static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *formatter)
 {
   auto iter = bl.cbegin();
@@ -588,6 +598,9 @@ void rgw_bucket_category_stats::dump(Formatter *f) const
   f->dump_unsigned("total_size_rounded", total_size_rounded);
   f->dump_unsigned("num_entries", num_entries);
   f->dump_unsigned("actual_size", actual_size);
+
+  f->dump_int("inlined_entry_num", inlined_entry_num);
+  f->dump_int("inlined_total_entry_size", inlined_total_entry_size);
 }
 
 void rgw_bucket_dir_header::generate_test_instances(list<rgw_bucket_dir_header*>& o)

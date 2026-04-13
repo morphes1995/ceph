@@ -46,13 +46,15 @@ CLS_NAME(rgw)
 #define BI_BUCKET_LOG_INDEX           1
 #define BI_BUCKET_OBJ_INSTANCE_INDEX  2
 #define BI_BUCKET_OLH_DATA_INDEX      3
+#define BI_BUCKET_INLINED_OBJ_INDEX   4
 
-#define BI_BUCKET_LAST_INDEX          4
+#define BI_BUCKET_LAST_INDEX          5
 
 static std::string bucket_index_prefixes[] = { "", /* special handling for the objs list index */
 					       "0_",     /* bucket log index */
 					       "1000_",  /* obj instance index */
 					       "1001_",  /* olh data index */
+                 "2001_", /* inlined entry index */
 
 					       /* this must be the last index */
 					       "9999_",};
@@ -335,6 +337,13 @@ static void encode_olh_data_key(const cls_rgw_obj_key& key, string *index_key)
   index_key->append(bucket_index_prefixes[BI_BUCKET_OLH_DATA_INDEX]);
   index_key->append(key.name);
 }
+static void encode_inlined_entry_key(const cls_rgw_obj_key& key, string *index_key)
+{
+  *index_key = BI_PREFIX_CHAR;
+  index_key->append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
+  index_key->append(key.name);
+}
+
 
 template <class T>
 static int read_index_entry(cls_method_context_t hctx, string& name, T *entry);
@@ -1266,6 +1275,10 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
         stats.total_size -= entry.meta.accounted_size;
         stats.total_size_rounded -= cls_rgw_get_rounded_size(entry.meta.accounted_size);
         stats.actual_size -= entry.meta.size;
+
+        // update inlined entry stats
+        stats.inlined_entry_num --;
+        stats.inlined_total_entry_size -= entry.meta.size;
       }
     }
 
@@ -1286,11 +1299,29 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
       stats.total_size += meta.accounted_size;
       stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
       stats.actual_size += meta.size;
+
+      // update inlined entry stats
+      stats.inlined_entry_num ++;
+      stats.inlined_total_entry_size += meta.size;
     }
 
     bufferlist new_key_bl;
     encode(entry, new_key_bl);
     rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+    if (rc < 0) {
+      return rc;
+    }
+
+    // insert inlined entry index key, for fast list all inlined entries in this shard
+    std::string inlined_entry_key;
+    encode_inlined_entry_key(op.key, &inlined_entry_key);
+
+    rgw_bucket_inlined_entry_index index_val;
+    index_val.entry_size = meta.size;
+    index_val.delete_marker = false;
+    bufferlist inlined_entry_idx_val;
+    encode(index_val, inlined_entry_idx_val);
+    rc = cls_cxx_map_set_val(hctx, inlined_entry_key, &inlined_entry_idx_val);
     if (rc < 0) {
       return rc;
     }
@@ -1304,6 +1335,8 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     // unaccount deleted entry
     if (op.update_quota_stats){
       unaccount_entry(header, entry);
+      // update inlined entry stats
+      header.stats[entry.meta.category].inlined_total_entry_size -= entry.meta.size;
     }
 
     entry.meta = op.meta;
@@ -1315,6 +1348,20 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     bufferlist new_key_bl;
     encode(entry, new_key_bl);
     rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+    if (rc < 0) {
+      return rc;
+    }
+
+    // insert inlined entry index key, for fast list all inlined entries in this shard
+    std::string inlined_entry_key;
+    encode_inlined_entry_key(op.key, &inlined_entry_key);
+
+    rgw_bucket_inlined_entry_index index_val;
+    index_val.entry_size = entry.meta.size;
+    index_val.delete_marker = true;
+    bufferlist inlined_entry_idx_val;
+    encode(index_val, inlined_entry_idx_val);
+    rc = cls_cxx_map_set_val(hctx, inlined_entry_key, &inlined_entry_idx_val);
     if (rc < 0) {
       return rc;
     }

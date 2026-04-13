@@ -545,6 +545,30 @@ struct rgw_bucket_dir_entry {
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 
+struct rgw_bucket_inlined_entry_index {
+    uint64_t entry_size;
+    bool delete_marker;
+
+    rgw_bucket_inlined_entry_index() : entry_size(0), delete_marker(false) {}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(entry_size, bl);
+        encode(delete_marker, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START(1, bl);
+        decode(entry_size, bl);
+        decode(delete_marker, bl);
+      DECODE_FINISH(bl);
+    }
+    void dump(ceph::Formatter *f) const;
+    void decode_json(JSONObj *obj);
+};
+
+WRITE_CLASS_ENCODER(rgw_bucket_inlined_entry_index)
+
 enum class BIIndexType : uint8_t {
   Invalid    = 0,
   Plain      = 1,
@@ -745,19 +769,23 @@ struct rgw_bucket_category_stats {
   uint64_t total_size_rounded;
   uint64_t num_entries;
   uint64_t actual_size{0}; //< account for compression, encryption
+  uint64_t inlined_entry_num;
+  uint64_t inlined_total_entry_size;
 
-  rgw_bucket_category_stats() : total_size(0), total_size_rounded(0), num_entries(0) {}
+  rgw_bucket_category_stats() : total_size(0), total_size_rounded(0), num_entries(0), inlined_entry_num(0), inlined_total_entry_size(0) {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(3, 2, bl);
+    ENCODE_START(4, 2, bl);
     encode(total_size, bl);
     encode(total_size_rounded, bl);
     encode(num_entries, bl);
     encode(actual_size, bl);
+    encode(inlined_entry_num, bl);
+    encode(inlined_total_entry_size, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(3, 2, 2, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(4, 2, 2, bl);
     decode(total_size, bl);
     decode(total_size_rounded, bl);
     decode(num_entries, bl);
@@ -765,6 +793,11 @@ struct rgw_bucket_category_stats {
       decode(actual_size, bl);
     } else {
       actual_size = total_size;
+    }
+
+    if(struct_v >= 4){
+      decode(inlined_entry_num, bl);
+      decode(inlined_total_entry_size, bl);
     }
     DECODE_FINISH(bl);
   }
