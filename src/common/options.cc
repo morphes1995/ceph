@@ -6065,6 +6065,22 @@ std::vector<Option> get_rgw_options() {
                           "For example, during debugging if one wanted every 10 minutes to be equivalent to one day, "
                           "then this would be set to 600, the number of seconds in 10 minutes."),
 
+    Option("rgw_inlined_obj_detach_interval", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+            .set_default(10)
+            .set_description("")
+            .set_long_description(
+                    "Time period for detach tiny objects inlined from bucket index entry to rados"),
+    Option("rgw_detach_max_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+            .set_default(3)
+            .set_description("Number of Detacher worker that will be run in parallel")
+            .set_long_description(
+                    "Number of Detacher tasks that will run in parallel "),
+
+    Option("rgw_detach_max_wp_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+            .set_default(3)
+            .set_description("Number of workpool threads per DCWorker")
+            .set_long_description("Number of workpool threads per DCWorker"),
+
     Option("rgw_mp_lock_max_time", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(600)
     .set_description("Multipart upload max completion time")

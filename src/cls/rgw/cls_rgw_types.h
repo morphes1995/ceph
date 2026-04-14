@@ -548,6 +548,8 @@ WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 struct rgw_bucket_inlined_entry_index {
     uint64_t entry_size;
     bool delete_marker;
+    bool detaching;
+    ceph::real_time start_timestamp;
 
     rgw_bucket_inlined_entry_index() : entry_size(0), delete_marker(false) {}
 
@@ -555,12 +557,16 @@ struct rgw_bucket_inlined_entry_index {
       ENCODE_START(1, 1, bl);
         encode(entry_size, bl);
         encode(delete_marker, bl);
+        encode(detaching, bl);
+        encode(start_timestamp, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
       DECODE_START(1, bl);
         decode(entry_size, bl);
         decode(delete_marker, bl);
+        decode(detaching, bl);
+        decode(start_timestamp, bl);
       DECODE_FINISH(bl);
     }
     void dump(ceph::Formatter *f) const;

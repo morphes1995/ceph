@@ -539,6 +539,177 @@ public:
                  bool* inlined = NULL, bool* head_exists = NULL, bufferlist *head_obj_tag = NULL, uint64_t *head_rados_size = NULL);
 };
 
+struct ShardItem{
+  string oid;
+  int shard_id;
+  rgw_bucket bucket;
+};
+
+class DCWorker;
+class DCWorkQ : public Thread
+{
+public:
+    using unique_lock = std::unique_lock<std::mutex>;
+    using dequeue_result = boost::variant<void*, ShardItem>;
+
+    static constexpr uint32_t FLAG_NONE =        0x0000;
+    static constexpr uint32_t FLAG_EWAIT_SYNC =  0x0001;
+    static constexpr uint32_t FLAG_DWAIT_SYNC =  0x0002;
+
+private:
+    const DoutPrefixProvider *dpp;
+    DCWorker* wk;
+    uint32_t qmax;
+    int ix;
+    std::mutex mtx;
+    std::condition_variable cv;
+    uint32_t flags;
+    map<string, ShardItem> items;
+    map<string, ShardItem> items_detaching;
+
+public:
+    DCWorkQ(const DoutPrefixProvider *_dpp, DCWorker* wk, uint32_t ix, uint32_t qmax)
+            :dpp(_dpp), wk(wk), qmax(qmax), ix(ix), flags(FLAG_NONE)
+    {
+      create(thr_name().c_str());
+    }
+
+    void stop();
+
+    std::string thr_name();
+    void enqueue(ShardItem& item);
+
+private:
+    dequeue_result dequeue();
+    void* entry() override;
+
+};
+
+
+class RGWRadosDetacher;
+class DCWorker{
+    const DoutPrefixProvider *dpp;
+    CephContext *cct;
+    RGWRadosDetacher *dc;
+    int ix;
+    using TVector = ceph::containers::tiny_vector<DCWorkQ, 3>;
+    TVector wqs;
+
+public:
+    DCWorker(const DoutPrefixProvider* dpp, CephContext *_cct, RGWRadosDetacher *dc, int ix, size_t n_threads);
+    void enqueue_bucket(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, rgw_bucket &bucket);
+    bool going_down();
+    int get_index(){ return ix; }
+    ~DCWorker();
+};
+
+class RGWRadosDetacher {
+public:
+    CephContext *cct;
+    rgw::sal::RGWRadosStore* store;
+    const DoutPrefixProvider *dpp;
+    std::atomic<bool> down_flag = { false };
+    ceph::shared_mutex mutex = ceph::make_shared_mutex("RGWRadosDetacher");
+    map<rgw_bucket, uint64_t> modified_buckets; // bucket -> inlined obj number
+
+    /* thread, trigger DCWorker detach inlined object from bucket index entry */
+    class DetachThread : public Thread {
+        CephContext *cct;
+        RGWRadosDetacher *dc;
+        bool _idle{false};
+        ceph::mutex lock = ceph::make_mutex("RGWRadosDetacher::DetachThread");
+        ceph::condition_variable cond;
+    public:
+
+        DetachThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
+
+        void *entry() override {
+          ldout(cct, 20) << "DetachThread: start" << dendl;
+          do {
+            map<rgw_bucket, uint64_t> buckets;
+            dc->swap_modified_buckets(buckets);
+
+            for (map<rgw_bucket, uint64_t>::iterator iter = buckets.begin(); iter != buckets.end(); ++iter) {
+              rgw_bucket bucket = iter->first;
+              uint64_t  inlined_obj_number = iter->second;
+              ldout(cct, 20) << "DetachThread deal bucket: "  << bucket.name << " inlined obj num: " << inlined_obj_number << dendl;
+
+              int r = dc->detach_bucket(bucket);
+              if (r < 0) {
+                ldout(cct, 0) << "WARNING: DetachThread detach_bucket returned r=" << r << dendl;
+              }
+            }
+
+            if (dc->going_down())
+              break;
+
+            if(buckets.empty()){
+              std::unique_lock locker{lock};
+              _idle = true;
+              cond.wait_for(
+                      locker,
+                      std::chrono::seconds(cct->_conf->rgw_inlined_obj_detach_interval));
+              _idle = false;
+            }
+          } while (!dc->going_down());
+
+          ldout(cct, 20) << "DetachThread: done" << dendl;
+          return NULL;
+        }
+
+        void try_wakup(){
+          std::unique_lock locker{lock};
+          if (_idle){
+            cond.notify_one();
+          }
+        }
+
+        void stop() {
+          std::lock_guard l{lock};
+          cond.notify_all();
+        }
+    };
+    DetachThread *detach_thread;
+    std::vector<std::unique_ptr<DCWorker>> workers;
+
+    RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGWRadosStore *_store, bool use_detacher);
+    void initialize(); // todo  init when rgw restart
+    void bucket_has_inlined_obj(rgw_bucket& bucket);
+    void swap_modified_buckets(map<rgw_bucket, uint64_t>& out);
+    int detach_bucket(rgw_bucket &bucket);
+
+    ~RGWRadosDetacher() {
+      stop();
+    }
+    bool going_down() {
+      return down_flag;
+    }
+
+private:
+    void _init_worker();
+
+    template<class T> /* easier doing it as a template, Thread doesn't have ->stop() */
+    void stop_thread(T **pthr) {
+      T *thread = *pthr;
+      if (!thread)
+        return;
+
+      thread->stop();
+      thread->join();
+      delete thread;
+      *pthr = NULL;
+    }
+
+    void stop() {
+      down_flag = true;
+      {
+        std::unique_lock lock{mutex};
+        stop_thread(&detach_thread);
+      }
+    }
+};
+
+
 class RGWRados
 {
   friend class RGWGC;
@@ -577,6 +748,7 @@ class RGWRados
   bool use_gc_thread;
   bool use_lc_thread;
   bool quota_threads;
+  bool use_detacher;
   bool run_sync_thread;
   bool run_reshard_thread;
 
@@ -652,6 +824,7 @@ protected:
   bool pools_initialized;
 
   RGWQuotaHandler *quota_handler;
+  RGWRadosDetacher *dc;
 
   RGWCoroutinesManagerRegistry *cr_registry;
 
@@ -674,6 +847,7 @@ public:
                binfo_cache(NULL), obj_tombstone_cache(nullptr),
                pools_initialized(false),
                quota_handler(NULL),
+               dc(NULL),
                cr_registry(NULL),
                pctl(&ctl),
                reshard(NULL) {}
@@ -706,6 +880,11 @@ public:
     quota_threads = _run_quota_threads;
     return *this;
   }
+
+    RGWRados& set_run_detacher(bool _run_detacher) {
+      use_detacher = _run_detacher;
+      return *this;
+    }
 
   RGWRados& set_run_sync_thread(bool _run_sync_thread) {
     run_sync_thread = _run_sync_thread;

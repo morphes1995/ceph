@@ -395,16 +395,16 @@ class RGWStoreManager {
 public:
   RGWStoreManager() {}
   static rgw::sal::RGWRadosStore *get_storage(const DoutPrefixProvider *dpp, CephContext *cct, bool use_gc_thread, bool use_lc_thread, bool quota_threads,
-			       bool run_sync_thread, bool run_reshard_thread, bool use_cache = true, bool use_gc = true) {
+			       bool run_sync_thread, bool run_reshard_thread, bool use_cache = true, bool use_gc = true, bool use_detacher = true) {
     rgw::sal::RGWRadosStore *store = init_storage_provider(dpp, cct, use_gc_thread, use_lc_thread,
-	quota_threads, run_sync_thread, run_reshard_thread, use_cache, use_gc);
+	quota_threads, run_sync_thread, run_reshard_thread, use_cache, use_gc, use_detacher);
     return store;
   }
   static rgw::sal::RGWRadosStore *get_raw_storage(const DoutPrefixProvider *dpp, CephContext *cct) {
     rgw::sal::RGWRadosStore *rados = init_raw_storage_provider(dpp, cct);
     return rados;
   }
-  static rgw::sal::RGWRadosStore *init_storage_provider(const DoutPrefixProvider *dpp, CephContext *cct, bool use_gc_thread, bool use_lc_thread, bool quota_threads, bool run_sync_thread, bool run_reshard_thread, bool use_metadata_cache, bool use_gc);
+  static rgw::sal::RGWRadosStore *init_storage_provider(const DoutPrefixProvider *dpp, CephContext *cct, bool use_gc_thread, bool use_lc_thread, bool quota_threads, bool run_sync_thread, bool run_reshard_thread, bool use_metadata_cache, bool use_gc, bool use_detacher);
   static rgw::sal::RGWRadosStore *init_raw_storage_provider(const DoutPrefixProvider *dpp, CephContext *cct);
   static void close_storage(rgw::sal::RGWRadosStore *store);
 

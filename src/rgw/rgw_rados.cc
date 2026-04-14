@@ -1318,6 +1318,7 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp)
     lc->start_processor();
 
   quota_handler = RGWQuotaHandler::generate_handler(dpp, this->store, quota_threads);
+  dc = new RGWRadosDetacher(dpp, this->store, use_detacher);
 
   bucket_index_max_shards = (cct->_conf->rgw_override_bucket_index_max_shards ? cct->_conf->rgw_override_bucket_index_max_shards :
                              zone.bucket_index_max_shards);
@@ -3414,8 +3415,6 @@ int RGWRados::Object::Write::write_meta_tiny_obj(const DoutPrefixProvider *dpp, 
         return -EIO;
     }
 
-    bool reset_obj = (meta.flags & PUT_OBJ_CREATE) != 0;
-
     string ptag;
     if (meta.ptag){
       ptag = *meta.ptag;
@@ -3540,6 +3539,13 @@ int RGWRados::Object::Write::write_meta_tiny_obj(const DoutPrefixProvider *dpp, 
     else {
         store->quota_handler->update_stats(meta.owner, obj.bucket, 1, accounted_size, 0); // always assume object didn't exists
     }
+
+    auto start_time = ceph_clock_now();
+    // let detacher know this bucket has inlined tiny objects
+    store->dc->bucket_has_inlined_obj(obj.bucket);
+    auto after_time = ceph_clock_now();
+    ldpp_dout(dpp, 20) << "notify detacher time taken: "<< (after_time - start_time) << dendl;
+
     return 0;
 }
 
@@ -4014,6 +4020,178 @@ int RGWConcurrentGetObjState::issue_get_obj_state_from_bi_entry_op(bufferlist *f
   obj_key.get_index_key(&key);
   cls_rgw_bi_get_obj_stat_op(op, BIIndexType::Plain, key, first_chunk ? true : false, conds, &result_from_bi_entry);
   return manager.aio_operate(index_pool_io_ctx, shard_oid, &op, false);
+}
+
+std::string DCWorkQ::thr_name() {
+  return std::string{"rgw_wkq:"}
+         + std::to_string(wk->get_index()) + "," + std::to_string(ix);
+}
+
+void DCWorkQ::enqueue(ShardItem& item) {
+  unique_lock uniq(mtx);
+  while ((!wk->going_down()) &&
+         (items.size() > qmax)) {
+    flags |= FLAG_EWAIT_SYNC;
+    cv.wait_for(uniq, 1000ms);
+    ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() <<"] full, enqueue wait ! " << dendl;
+  }
+
+  if (items.find(item.oid) == items.end()){
+    items[item.oid] = item;
+  }
+  if (flags & FLAG_DWAIT_SYNC) {
+    flags &= ~FLAG_DWAIT_SYNC;
+    cv.notify_one();
+    ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() <<"] shard incoming! wake up dequeue " << dendl;
+  }
+}
+
+DCWorkQ::dequeue_result DCWorkQ::dequeue() {
+  unique_lock uniq(mtx);
+  while ((!wk->going_down()) &&
+         (items.size() == 0 && items_detaching.size() == 0)) {
+    flags |= FLAG_DWAIT_SYNC;
+
+    cv.wait_for(uniq, 10s);
+    ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() <<"] dequeue waken up! " << dendl;
+  }
+
+  if (items_detaching.size() == 0){
+    items.swap(items_detaching);
+
+    if (flags & FLAG_EWAIT_SYNC) {
+      flags &= ~FLAG_EWAIT_SYNC;
+      cv.notify_one();
+      ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() <<"] shard consumed! wake up enqueue " << dendl;
+    }
+  }
+
+  if (items_detaching.size() > 0) {
+    auto it = items_detaching.begin();
+    ShardItem item = it->second;
+    items_detaching.erase(it);
+
+    return {item};
+  }
+  return nullptr;
+}
+
+void* DCWorkQ::entry() {
+  while (!wk->going_down()) {
+    auto item = dequeue();
+    if (item.which() == 0) {
+      /* going down */
+      break;
+    }
+    ShardItem shardItem = boost::get<ShardItem>(item);
+    usleep(50 * 1000);
+    ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() <<"] detaching bucket: " << shardItem.bucket.name << " shard:" << shardItem.oid << dendl;
+    // todo do detach of the shard
+  }
+  return nullptr;
+}
+
+void DCWorkQ::stop()
+{
+  unique_lock uniq(mtx);
+  cv.notify_all();
+}
+
+
+DCWorker::DCWorker(const DoutPrefixProvider* _dpp, CephContext *_cct, RGWRadosDetacher *_dc, int _ix, size_t n_threads)
+        : dpp(_dpp), cct(_cct), dc(_dc), ix(_ix),
+        wqs(TVector{n_threads,  [&](const size_t ix, auto emplacer) {
+            emplacer.emplace(dpp, this, ix, 512);
+        }})
+{
+}
+
+bool DCWorker::going_down(){
+  return dc->going_down();
+}
+
+void DCWorker::enqueue_bucket(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, rgw_bucket &bucket){
+  for (const auto &entry: oids){
+    int tix = ceph_str_hash_linux(entry.second.c_str(), entry.second.size()) % HASH_PRIME % wqs.size();
+    ShardItem item;
+    item.oid = entry.second;
+    item.shard_id = entry.first;
+    item.bucket = bucket;
+    (wqs[tix]).enqueue(item);
+  }
+}
+
+DCWorker::~DCWorker() {
+  for (auto &wq: wqs){
+    wq.stop();
+  }
+
+  for (auto &wq: wqs){
+    wq.join();
+  }
+}
+
+RGWRadosDetacher::RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGWRadosStore *_store, bool use_detacher)
+        :cct(_store->ctx()), store(_store), dpp(_dpp)
+{
+  if(use_detacher){
+    detach_thread = new DetachThread(_store->ctx(), this);
+    detach_thread->create("rgw_dc_thread");
+    _init_worker();
+  }
+}
+
+void RGWRadosDetacher::_init_worker()
+{
+  auto max_w = cct->_conf->rgw_detach_max_worker;
+  auto max_wp = cct->_conf.get_val<int64_t>("rgw_detach_max_wp_worker");
+  workers.reserve(max_w);
+  for (int ix = 0; ix < max_w; ++ix) {
+    auto worker  = std::make_unique<DCWorker>(dpp, cct, this, ix, max_wp);
+    workers.emplace_back(std::move(worker));
+  }
+}
+
+void RGWRadosDetacher::bucket_has_inlined_obj(rgw_bucket& bucket){
+  std::unique_lock lock{mutex};
+  bool exist = modified_buckets.find(bucket) != modified_buckets.end();
+  if (!exist) {
+    modified_buckets[bucket] = 0;
+  }
+  modified_buckets[bucket] += 1;
+
+  detach_thread->try_wakup();
+}
+
+void RGWRadosDetacher::swap_modified_buckets(map<rgw_bucket, uint64_t>& out) {
+  std::unique_lock lock{mutex};
+  modified_buckets.swap(out);
+}
+
+int RGWRadosDetacher::detach_bucket(rgw_bucket &bucket) {
+  string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
+  //idx of DCWorker that handle this buckets inlined tiny objects
+  int index = ceph_str_hash_linux(bucket_id.c_str(), bucket_id.size()) % HASH_PRIME % workers.size();
+
+  RGWSI_RADOS::Pool index_pool;
+  RGWBucketInfo info;
+  map<string, bufferlist> attrs;
+  int r = store->getRados()->get_bucket_info(store->svc(), bucket.tenant, bucket.name, info, NULL, null_yield, dpp, &attrs);
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "WARNING: get_bucket_info on bucket=" << bucket.name << " returned err=" << r << ", skipping bucket" << dendl;
+    return r;
+  }
+
+  map<int, string> shard_oids;
+  r = store->svc()->bi_rados->open_bucket_index(dpp, info, RGW_NO_SHARD, &index_pool, &shard_oids,
+                                          nullptr);
+  if (r < 0) {
+    return r;
+  }
+
+  workers[index]->enqueue_bucket(index_pool.ioctx(), shard_oids, bucket);
+
+  return 0;
 }
 
 /*
@@ -5711,6 +5889,9 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
     /* update quota cache */
     target->get_store()->quota_handler->update_stats(params.bucket_owner, obj.bucket, -1, 0, obj_accounted_size);
   }
+
+  // let rgw detacher know this bucket has inlined tiny objects
+  target->get_store()->dc->bucket_has_inlined_obj(obj.bucket);
 
   return 0;
 }

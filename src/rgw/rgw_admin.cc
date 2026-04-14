@@ -3994,7 +3994,7 @@ int main(int argc, const char **argv)
     store = RGWStoreManager::get_raw_storage(dpp(), g_ceph_context);
   } else {
     store = RGWStoreManager::get_storage(dpp(), g_ceph_context, false, false, false, false, false,
-      need_cache && g_conf()->rgw_cache_enabled, need_gc);
+      need_cache && g_conf()->rgw_cache_enabled, need_gc, false);
   }
   if (!store) {
     cerr << "couldn't init storage provider" << std::endl;

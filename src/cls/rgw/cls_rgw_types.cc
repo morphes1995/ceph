@@ -244,10 +244,15 @@ void rgw_bucket_inlined_entry_index::dump(Formatter *f) const
 {
   encode_json("entry_size", entry_size, f);
   encode_json("delete_marker", delete_marker , f);
+  encode_json("detaching", detaching , f);
+  encode_json("start_timestamp", start_timestamp , f);
 }
+
 void rgw_bucket_inlined_entry_index::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("entry_size", entry_size, obj);
   JSONDecoder::decode_json("delete_marker", delete_marker , obj);
+  JSONDecoder::decode_json("detaching", detaching , obj);
+  JSONDecoder::decode_json("start_timestamp", start_timestamp , obj);
 }
 
 static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *formatter)
