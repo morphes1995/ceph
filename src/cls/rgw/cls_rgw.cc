@@ -337,13 +337,18 @@ static void encode_olh_data_key(const cls_rgw_obj_key& key, string *index_key)
   index_key->append(bucket_index_prefixes[BI_BUCKET_OLH_DATA_INDEX]);
   index_key->append(key.name);
 }
+
 static void encode_inlined_entry_key(const cls_rgw_obj_key& key, string *index_key)
 {
   *index_key = BI_PREFIX_CHAR;
   index_key->append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
   index_key->append(key.name);
 }
-
+static void decode_inlined_entry_key(const string& index_key, cls_rgw_obj_key *key)
+{
+  key->name = index_key.substr(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX].size() + 1);
+  key->instance = "";
+}
 
 template <class T>
 static int read_index_entry(cls_method_context_t hctx, string& name, T *entry);
@@ -1080,7 +1085,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   } else if (rc < 0) {
     return rc;
   }
-
+  bool entry_already_inline = entry.meta.inline_head;
   entry.index_ver = header.ver;
   /* resetting entry flags, entry might have been previously a delete
    * marker */
@@ -1106,7 +1111,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   }
 
   if (op.op != CLS_RGW_OP_CANCEL && op.tag.size()){
-    if(entry.meta.inline_head && entry.meta.inline_index_epoch > pending_index_epoch){
+    if(entry_already_inline && entry.meta.inline_index_epoch > pending_index_epoch){
       // inline head data writes to this entry after prepare op , we can not complete this entry, cancel this op and keep inlined entry latest
       CLS_LOG(5, "rgw_bucket_complete_op(): skipping request, op: %d, we can not overwrite the inlined entry: "
                  " inline_index_epoch: %ld, pending_index_epoch: %ld \n", op.op, entry.meta.inline_index_epoch, pending_index_epoch);
@@ -1180,6 +1185,11 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     // unaccount overwritten entry
     if (op.update_quota_stats){
         unaccount_entry(header, entry);
+      if(entry_already_inline){
+        rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+        stats.inlined_entry_num --;
+        stats.inlined_total_entry_size -= entry.meta.size;
+      }
     }
 
     rgw_bucket_dir_entry_meta& meta = op.meta;
@@ -1201,6 +1211,16 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     if (rc < 0) {
       return rc;
     }
+
+    if (entry_already_inline){
+      std::string inlined_index_key;
+      encode_inlined_entry_key(entry.key, &inlined_index_key);
+      rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
+      if (rc < 0 && rc != -ENOENT){
+        CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
+      }
+    }
+
   } // CLS_RGW_OP_ADD
 
   if (log_op) {
@@ -1277,8 +1297,10 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
         stats.actual_size -= entry.meta.size;
 
         // update inlined entry stats
-        stats.inlined_entry_num --;
-        stats.inlined_total_entry_size -= entry.meta.size;
+        if(entry.meta.inline_head){
+          stats.inlined_entry_num --;
+          stats.inlined_total_entry_size -= entry.meta.size;
+        }
       }
     }
 
@@ -1386,6 +1408,271 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     }
   }
 
+  return write_bucket_header(hctx, &header);
+}
+
+int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+
+  constexpr int max_attempts = 8;
+  auto iter = in->cbegin();
+  rgw_cls_list_op op;
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  rgw_cls_list_ret ret;
+  rgw_bucket_dir& new_dir = ret.dir;
+  auto& name_entry_map = new_dir.m; // map of keys to entries
+
+  int rc = read_bucket_header(hctx, &new_dir.header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
+    return rc;
+  }
+
+  if (new_dir.header.stats[RGWObjCategory::Main].inlined_entry_num <= 0) {
+    ret.is_truncated = false;
+    encode(ret, *out);
+    return 0;
+  }
+
+  if (new_dir.header.rgw_instance_hold_lease != op.rgw_instance ||
+      new_dir.header.acquire_time + 3s < ceph::real_clock::now()){
+    CLS_LOG(10, "WARNING: %s:  rgw %s ailed to acquire shard list lease", __func__, op.rgw_instance.c_str());
+    return -ECANCELED;
+  }
+
+  op.filter_prefix = BI_PREFIX_CHAR;
+  op.filter_prefix.append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
+
+  // key that we can start listing at, one of
+  // a) sent in by caller,
+  // b) last item visited
+  std::string start_after_omap_key;
+  if (op.start_obj.name.empty()){
+    start_after_omap_key = op.filter_prefix;
+  }else {
+    encode_inlined_entry_key(op.start_obj, &start_after_omap_key);
+  }
+
+  // this is set whenenver start_after_omap_key is set to keep them in sync
+  // since this will be the returned marker when a marker is returned
+  cls_rgw_obj_key start_after_entry_key;
+
+  // last key stored in result, so if we have to call cls_cxx_map_get_vals
+  // multiple times, we do not add the overlap to result
+  std::string prev_omap_key;
+
+  // last prefix_key stored in result, so we can skip over entries
+  // with the same prefix_key
+  std::string prev_prefix_omap_key;
+
+  bool done = false;   // whether we need to keep calling cls_cxx_map_get_vals
+  bool more = true;    // output parameter of cls_cxx_map_get_vals
+
+  for (int attempt = 0;
+       attempt < max_attempts &&
+       more &&
+       !done &&
+       name_entry_map.size() < op.num_entries;
+       ++attempt) {
+    std::map<std::string, bufferlist> keys;
+
+    rc = cls_cxx_map_get_vals(hctx, start_after_omap_key, op.filter_prefix, op.num_entries - name_entry_map.size(),
+                               &keys, &more);
+    if (rc < 0) {
+      return rc;
+    }
+    CLS_LOG(20, "%s: on attempt %d get_obj_vls returned %ld entries, more=%d",
+            __func__, attempt, keys.size(), more);
+
+    done = keys.empty();
+
+    for (auto kiter = keys.cbegin(); kiter != keys.cend(); ++kiter) {
+
+      rgw_bucket_inlined_entry_index entry;
+      try {
+        const bufferlist& bl = kiter->second;
+        auto eiter = bl.cbegin();
+        decode(entry, eiter);
+      } catch (ceph::buffer::error& err) {
+        CLS_LOG(1, "ERROR: %s: failed to decode inlined index entry, key=%s",
+                __func__, kiter->first.c_str());
+        return -EINVAL;
+      }
+
+      start_after_omap_key = kiter->first;
+      CLS_LOG(20, "%s: working on key=%s len=%zu", __func__, kiter->first.c_str(), kiter->first.size());
+
+      cls_rgw_obj_key real_key;
+      decode_inlined_entry_key(kiter->first, &real_key);
+      start_after_entry_key = real_key;
+
+      if (name_entry_map.size() < op.num_entries && kiter->first != prev_omap_key) {
+        rgw_bucket_dir_entry real_entry;
+        std::string real_idx;
+        rc = read_key_entry(hctx, real_key, &real_idx, &real_entry);
+        if (rc < 0 && rc != -ENOENT) {
+          CLS_LOG(1, "ERROR: %s: failed read real entry, key=%s",
+                  __func__, real_idx.c_str());
+        }
+        if (rc == -ENOENT){
+          real_entry.key = real_key;
+          real_entry.exists = false;
+        }
+
+        name_entry_map[real_entry.key.name] = real_entry;
+
+        prev_omap_key = kiter->first;
+        CLS_LOG(20, "%s: got object entry %s[%s] num entries=%d",
+                __func__, real_key.name.c_str(), real_key.instance.c_str(),
+                int(name_entry_map.size()));
+      }
+    }
+  }
+
+  ret.is_truncated = more && !done;
+  if (ret.is_truncated) {
+    ret.marker = start_after_entry_key;
+  }
+  CLS_LOG(20, "%s: normal exit returning %ld entries, is_truncated=%d", __func__, ret.dir.m.size(), ret.is_truncated);
+  encode(ret, *out);
+
+  if (ret.is_truncated && name_entry_map.size() == 0) {
+    CLS_LOG(5, "%s: returning value RGWBIAdvanceAndRetryError", __func__);
+    return RGWBIAdvanceAndRetryError;
+  } else {
+    return 0;
+  }
+}
+
+int rgw_bucket_shard_acquire_lease(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+
+  auto iter = in->cbegin();
+  rgw_cls_list_op op;
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+  rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
+    return rc;
+  }
+
+  if (header.rgw_instance_hold_lease.empty() || header.acquire_time +3s < ceph::real_clock::now()){
+    header.rgw_instance_hold_lease = op.rgw_instance;
+    header.acquire_time = ceph::real_clock::now();
+  }else {
+    return -EINVAL;
+  }
+
+  return write_bucket_header(hctx, &header);
+}
+
+int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  int rc = 0;
+  auto iter = in->cbegin();
+  rgw_cls_clear_inlined_data_op op;
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  rgw_bucket_dir_header header;
+  rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
+    return rc;
+  }
+  rgw_bucket_category_stats &stats = header.stats[RGWObjCategory::Main];
+
+  for (const auto &op_entry: op.entries){
+    std::string inlined_index_key;
+    encode_inlined_entry_key(op_entry.key, &inlined_index_key);
+
+    rgw_bucket_dir_entry entry;
+    std::string entry_idx;
+    rc = read_key_entry(hctx, op_entry.key, &entry_idx, &entry);
+    if (rc < 0 && rc != -ENOENT) {
+      CLS_LOG(1, "ERROR: %s: failed to read entry %s, r: %d", __func__, op_entry.key.to_string().c_str(), rc);
+      return rc;
+    }
+
+    /*
+     * we heed consider 4 cases here:
+     * 1. entry was already deleted
+     * 2. entry was overwritten by big object
+     * 3. entry was overwritten by small object
+     * 4. entry is still what we are detaching
+     */
+
+    if (rc == -ENOENT || !entry.meta.inline_head){
+      CLS_LOG(1, "WARNING: %s: entry %s didn't exist ", __func__, op_entry.key.to_string().c_str());
+      rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
+      if (rc < 0 && rc != -ENOENT){
+        CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
+      }
+      continue;
+    }
+
+    if(entry.meta.inline_index_epoch == op_entry.inline_index_epoch
+       && entry.tag == op_entry.tag)
+    {
+      string entry_key;
+      encode_obj_index_key(op_entry.key, &entry_key);
+      if (entry.exists){
+        // inlined entry is still what we detached
+        // clear inlined head data
+        entry.meta.inline_head = false;
+        entry.meta.head_data.clear();
+        entry.meta.head_data_size =0;
+        entry.meta.head_attrs.clear();
+        entry.meta.inline_index_epoch = 0;
+
+        bufferlist entry_bl;
+        encode(entry, entry_bl);
+        rc = cls_cxx_map_set_val(hctx, entry_key, &entry_bl);
+        if (rc < 0) {
+          CLS_LOG(0, "ERROR: %s: cls_cxx_map_set_val() returned r=%d", __func__, rc);
+          return rc;
+        }
+      }else{
+        rc = cls_cxx_map_remove_key(hctx, entry_key);
+        if (rc < 0) {
+          CLS_LOG(0, "ERROR: %s: cls_cxx_map_set_val() returned r=%d", __func__, rc);
+          return rc;
+        }
+      }
+
+      stats.inlined_entry_num -= 1;
+      if (entry.exists){
+        stats.inlined_total_entry_size -= entry.meta.size;
+      }
+
+      rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
+      if (rc < 0 && rc != -ENOENT){
+        CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
+      }
+
+    } else {
+      CLS_LOG(20, "WARNING: %s: inlined index key %s was overwritten", __func__, inlined_index_key.c_str());
+    }
+  }
   return write_bucket_header(hctx, &header);
 }
 
@@ -4813,6 +5100,9 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_bucket_init_index;
   cls_method_handle_t h_rgw_bucket_set_tag_timeout;
   cls_method_handle_t h_rgw_bucket_list;
+  cls_method_handle_t h_rgw_bucket_inlined_entry_list;
+  cls_method_handle_t h_rgw_bucket_shard_acquire_lease;
+  cls_method_handle_t h_rgw_bucket_clear_inlined_data;
   cls_method_handle_t h_rgw_bucket_check_index;
   cls_method_handle_t h_rgw_bucket_rebuild_index;
   cls_method_handle_t h_rgw_bucket_update_stats;
@@ -4867,6 +5157,9 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BUCKET_INIT_INDEX, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_init_index, &h_rgw_bucket_init_index);
   cls_register_cxx_method(h_class, RGW_BUCKET_SET_TAG_TIMEOUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_set_tag_timeout, &h_rgw_bucket_set_tag_timeout);
   cls_register_cxx_method(h_class, RGW_BUCKET_LIST, CLS_METHOD_RD, rgw_bucket_list, &h_rgw_bucket_list);
+  cls_register_cxx_method(h_class, RGW_BUCKET_INLINED_ENTRY_LIST, CLS_METHOD_RD, rgw_bucket_list_inlined_entry_op, &h_rgw_bucket_inlined_entry_list);
+  cls_register_cxx_method(h_class, RGW_BUCKET_SHARD_ACQUIRE_LEASE, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_shard_acquire_lease, &h_rgw_bucket_shard_acquire_lease);
+  cls_register_cxx_method(h_class, RGW_BUCKET_CLEAR_INLINED_DATA, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_clear_entry_inlined_data_op, &h_rgw_bucket_clear_inlined_data);
   cls_register_cxx_method(h_class, RGW_BUCKET_CHECK_INDEX, CLS_METHOD_RD, rgw_bucket_check_index, &h_rgw_bucket_check_index);
   cls_register_cxx_method(h_class, RGW_BUCKET_REBUILD_INDEX, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_rebuild_index, &h_rgw_bucket_rebuild_index);
   cls_register_cxx_method(h_class, RGW_BUCKET_UPDATE_STATS, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_update_stats, &h_rgw_bucket_update_stats);

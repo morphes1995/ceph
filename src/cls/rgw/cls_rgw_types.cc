@@ -641,6 +641,10 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
   }
   f->close_section();
   ::encode_json("new_instance", new_instance, f);
+
+  f->dump_string("rgw_instance_hold_lease", rgw_instance_hold_lease);
+  utime_t ut(acquire_time);
+  encode_json("acquire_time", ut, f);
 }
 
 void rgw_bucket_dir::generate_test_instances(list<rgw_bucket_dir*>& o)

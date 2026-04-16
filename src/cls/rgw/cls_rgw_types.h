@@ -898,10 +898,14 @@ struct rgw_bucket_dir_header {
   cls_rgw_bucket_instance_entry new_instance;
   bool syncstopped;
 
+  // lease info
+  std::string rgw_instance_hold_lease;
+  ceph::real_time  acquire_time;
+
   rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false) {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(7, 2, bl);
+    ENCODE_START(8, 2, bl);
     encode(stats, bl);
     encode(tag_timeout, bl);
     encode(ver, bl);
@@ -909,6 +913,8 @@ struct rgw_bucket_dir_header {
     encode(max_marker, bl);
     encode(new_instance, bl);
     encode(syncstopped,bl);
+    encode(rgw_instance_hold_lease, bl);
+    encode(acquire_time, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -935,6 +941,10 @@ struct rgw_bucket_dir_header {
     }
     if (struct_v >= 7) {
       decode(syncstopped,bl);
+    }
+    if (struct_v >= 7){
+      decode(rgw_instance_hold_lease, bl);
+      decode(acquire_time, bl);
     }
     DECODE_FINISH(bl);
   }

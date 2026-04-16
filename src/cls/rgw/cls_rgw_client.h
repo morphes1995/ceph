@@ -456,10 +456,20 @@ public:
 void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
                             const cls_rgw_obj_key& start_obj,
                             const std::string& filter_prefix,
-			    const std::string& delimiter,
+			                      const std::string& delimiter,
                             uint32_t num_entries,
                             bool list_versions,
                             rgw_cls_list_ret* result);
+
+void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
+                                          const cls_rgw_obj_key& start_obj,
+                                          uint32_t num_entries, string &rgw_instance,
+                                          rgw_cls_list_ret* result);
+
+void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance);
+
+void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op,
+                                                list<rgw_bucket_inlined_entry> &entries);
 
 void cls_rgw_bilog_list(librados::ObjectReadOperation& op,
                         const std::string& marker, uint32_t max,

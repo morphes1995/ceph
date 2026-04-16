@@ -6071,13 +6071,13 @@ std::vector<Option> get_rgw_options() {
             .set_long_description(
                     "Time period for detach tiny objects inlined from bucket index entry to rados"),
     Option("rgw_detach_max_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(3)
+            .set_default(1)
             .set_description("Number of Detacher worker that will be run in parallel")
             .set_long_description(
                     "Number of Detacher tasks that will run in parallel "),
 
     Option("rgw_detach_max_wp_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(3)
+            .set_default(4)
             .set_description("Number of workpool threads per DCWorker")
             .set_long_description("Number of workpool threads per DCWorker"),
 

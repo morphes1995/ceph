@@ -305,6 +305,7 @@ void rgw_cls_list_op::dump(Formatter *f) const
 {
   f->dump_string("start_obj", start_obj.name);
   f->dump_unsigned("num_entries", num_entries);
+  f->dump_string("rgw_instance", rgw_instance);
 }
 
 void rgw_cls_list_ret::generate_test_instances(list<rgw_cls_list_ret*>& o)
@@ -332,6 +333,17 @@ void rgw_cls_list_ret::dump(Formatter *f) const
   dir.dump(f);
   f->close_section();
   f->dump_int("is_truncated", (int)is_truncated);
+}
+
+void rgw_bucket_inlined_entry::dump(Formatter *f) const {
+  encode_json("key", key, f);
+  encode_json("tag", tag, f);
+  encode_json("inline_index_epoch", inline_index_epoch, f);
+}
+
+void rgw_cls_clear_inlined_data_op::dump(Formatter *f) const
+{
+  encode_json("entries", entries, f);
 }
 
 void rgw_cls_check_index_ret::generate_test_instances(list<rgw_cls_check_index_ret*>& o)

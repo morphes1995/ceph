@@ -330,7 +330,42 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
 	  new ClsBucketIndexOpCtx<rgw_cls_list_ret>(result, NULL));
 }
 
-static bool issue_bucket_list_op(librados::IoCtx& io_ctx,
+void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
+                            const cls_rgw_obj_key& start_obj,
+                            uint32_t num_entries, string &rgw_instance,
+                            rgw_cls_list_ret* result)
+{
+  bufferlist in;
+  rgw_cls_list_op call;
+  call.start_obj = start_obj;
+  call.num_entries = num_entries;
+  call.rgw_instance = rgw_instance;
+  encode(call, in);
+
+  op.exec(RGW_CLASS, RGW_BUCKET_INLINED_ENTRY_LIST, in,
+          new ClsBucketIndexOpCtx<rgw_cls_list_ret>(result, NULL));
+}
+
+void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance)
+{
+  bufferlist in;
+  rgw_cls_list_op call;
+  call.rgw_instance = rgw_instance;
+  encode(call, in);
+
+  op.exec(RGW_CLASS, RGW_BUCKET_SHARD_ACQUIRE_LEASE, in);
+}
+
+void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries)
+{
+  rgw_cls_clear_inlined_data_op call;
+  call.entries = entries;
+  bufferlist in;
+  encode(call, in);
+  op.exec(RGW_CLASS, RGW_BUCKET_CLEAR_INLINED_DATA, in);
+}
+
+  static bool issue_bucket_list_op(librados::IoCtx& io_ctx,
 				 const int shard_id,
 				 const std::string& oid,
 				 const cls_rgw_obj_key& start_obj,

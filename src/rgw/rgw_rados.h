@@ -543,6 +543,9 @@ struct ShardItem{
   string oid;
   int shard_id;
   rgw_bucket bucket;
+  librados::IoCtx index_pool_io_ctx;
+  rgw_placement_rule placement_rule;
+  string rgw_instance;
 };
 
 class DCWorker;
@@ -575,14 +578,15 @@ public:
     }
 
     void stop();
-
+    rgw::sal::RGWRadosStore* get_store();
     std::string thr_name();
     void enqueue(ShardItem& item);
 
 private:
     dequeue_result dequeue();
     void* entry() override;
-
+    void batch_detach_parallel(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries);
+    int _refresh_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent);
 };
 
 
@@ -597,8 +601,9 @@ class DCWorker{
 
 public:
     DCWorker(const DoutPrefixProvider* dpp, CephContext *_cct, RGWRadosDetacher *dc, int ix, size_t n_threads);
-    void enqueue_bucket(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, rgw_bucket &bucket);
+    void enqueue_bucket(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, rgw_bucket &bucket, rgw_placement_rule &rule, std::string &rgw_instance);
     bool going_down();
+    rgw::sal::RGWRadosStore* get_store();
     int get_index(){ return ix; }
     ~DCWorker();
 };
@@ -610,7 +615,7 @@ public:
     const DoutPrefixProvider *dpp;
     std::atomic<bool> down_flag = { false };
     ceph::shared_mutex mutex = ceph::make_shared_mutex("RGWRadosDetacher");
-    map<rgw_bucket, uint64_t> modified_buckets; // bucket -> inlined obj number
+    map<rgw_bucket, rgw_placement_rule> modified_buckets;
 
     /* thread, trigger DCWorker detach inlined object from bucket index entry */
     class DetachThread : public Thread {
@@ -619,22 +624,28 @@ public:
         bool _idle{false};
         ceph::mutex lock = ceph::make_mutex("RGWRadosDetacher::DetachThread");
         ceph::condition_variable cond;
+        std::string rgw_instance;
     public:
 
-        DetachThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
+        DetachThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {
+          #define RGW_INSTANCE_LEN 32
+          char buf[RGW_INSTANCE_LEN + 1];
+          gen_rand_alphanumeric_no_underscore(cct, buf, RGW_INSTANCE_LEN);
+          rgw_instance = buf;
+        }
 
         void *entry() override {
           ldout(cct, 20) << "DetachThread: start" << dendl;
           do {
-            map<rgw_bucket, uint64_t> buckets;
+            map<rgw_bucket, rgw_placement_rule> buckets;
             dc->swap_modified_buckets(buckets);
 
-            for (map<rgw_bucket, uint64_t>::iterator iter = buckets.begin(); iter != buckets.end(); ++iter) {
+            for (map<rgw_bucket, rgw_placement_rule>::iterator iter = buckets.begin(); iter != buckets.end(); ++iter) {
               rgw_bucket bucket = iter->first;
-              uint64_t  inlined_obj_number = iter->second;
-              ldout(cct, 20) << "DetachThread deal bucket: "  << bucket.name << " inlined obj num: " << inlined_obj_number << dendl;
+              rgw_placement_rule  rule = iter->second;
+              ldout(cct, 20) << "DetachThread deal bucket: "  << bucket.name << dendl;
 
-              int r = dc->detach_bucket(bucket);
+              int r = dc->detach_bucket(bucket, rule, rgw_instance);
               if (r < 0) {
                 ldout(cct, 0) << "WARNING: DetachThread detach_bucket returned r=" << r << dendl;
               }
@@ -674,9 +685,9 @@ public:
 
     RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGWRadosStore *_store, bool use_detacher);
     void initialize(); // todo  init when rgw restart
-    void bucket_has_inlined_obj(rgw_bucket& bucket);
-    void swap_modified_buckets(map<rgw_bucket, uint64_t>& out);
-    int detach_bucket(rgw_bucket &bucket);
+    void bucket_has_inlined_obj(rgw_bucket& bucket, rgw_placement_rule &placement_rule);
+    void swap_modified_buckets(map<rgw_bucket, rgw_placement_rule>& out);
+    int detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule, std::string &rgw_instance);
 
     ~RGWRadosDetacher() {
       stop();
@@ -776,7 +787,6 @@ class RGWRados
   // This field represents the number of bucket index object shards
   uint32_t bucket_index_max_shards;
 
-  int get_obj_head_ref(const DoutPrefixProvider *dpp, const rgw_placement_rule& target_placement_rule, const rgw_obj& obj, rgw_rados_ref *ref);
   int get_obj_head_ref(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_rados_ref *ref);
   int get_system_obj_ref(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj, rgw_rados_ref *ref);
   
@@ -866,6 +876,10 @@ public:
     return lc;
   }
 
+  RGWGC *get_gc() {
+    return gc;
+  }
+
   RGWRados& set_run_gc_thread(bool _use_gc_thread) {
     use_gc_thread = _use_gc_thread;
     return *this;
@@ -941,6 +955,7 @@ public:
     return sync_tracer;
   }
 
+  int get_obj_head_ref(const DoutPrefixProvider *dpp, const rgw_placement_rule& target_placement_rule, const rgw_obj& obj, rgw_rados_ref *ref);
   int get_required_alignment(const DoutPrefixProvider *dpp, const rgw_pool& pool, uint64_t *alignment);
   void get_max_aligned_size(uint64_t size, uint64_t alignment, uint64_t *max_size);
   int get_max_chunk_size(const rgw_pool& pool, uint64_t *max_chunk_size, const DoutPrefixProvider *dpp, uint64_t *palignment = nullptr);
