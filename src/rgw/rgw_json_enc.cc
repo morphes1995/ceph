@@ -695,7 +695,7 @@ void RGWStorageStats::dump(Formatter *f) const
   }
   encode_json("num_objects", num_objects, f);
   encode_json("inlined_entry_num", inlined_entry_num, f);
-  encode_json("inlined_total_entry_size", inlined_total_entry_size, f);
+  encode_json("inlined_total_entry_size_mb", (inlined_total_entry_size >> 10 >> 10), f);
 }
 
 void RGWRedirectInfo::dump(Formatter *f) const

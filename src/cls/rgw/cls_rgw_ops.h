@@ -397,6 +397,7 @@ struct rgw_cls_list_op
   bool list_versions;
   std::string delimiter;
   std::string rgw_instance;
+  int lease_hold_interval_ms;
 
   rgw_cls_list_op() : num_entries(0), list_versions(false){}
 
@@ -408,6 +409,7 @@ struct rgw_cls_list_op
     encode(list_versions, bl);
     encode(delimiter, bl);
     encode(rgw_instance, bl);
+    encode(lease_hold_interval_ms, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -431,6 +433,7 @@ struct rgw_cls_list_op
 
     if(struct_v >= 7){
       decode(rgw_instance, bl);
+      decode(lease_hold_interval_ms, bl);
     }
     DECODE_FINISH(bl);
   }

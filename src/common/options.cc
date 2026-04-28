@@ -6081,6 +6081,15 @@ std::vector<Option> get_rgw_options() {
             .set_description("Number of workpool threads per DCWorker")
             .set_long_description("Number of workpool threads per DCWorker"),
 
+    Option("rgw_detach_list_batch_num", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+            .set_default(32)
+            .set_description("Number of inlined object number for a list op")
+            .set_long_description("Number of inlined object number for a list op"),
+    Option("rgw_detach_lease_hold_interval_ms", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+            .set_default(500)
+            .set_description("detach worker shard lease hold interval")
+            .set_long_description("etach worker shard lease hold interval"),
+
     Option("rgw_mp_lock_max_time", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(600)
     .set_description("Multipart upload max completion time")

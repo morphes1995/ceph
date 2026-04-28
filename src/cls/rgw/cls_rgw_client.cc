@@ -332,7 +332,7 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
                             const cls_rgw_obj_key& start_obj,
-                            uint32_t num_entries, string &rgw_instance,
+                            uint32_t num_entries, string &rgw_instance, int hold_interval,
                             rgw_cls_list_ret* result)
 {
   bufferlist in;
@@ -340,17 +340,19 @@ void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
   call.start_obj = start_obj;
   call.num_entries = num_entries;
   call.rgw_instance = rgw_instance;
+  call.lease_hold_interval_ms = hold_interval;
   encode(call, in);
 
   op.exec(RGW_CLASS, RGW_BUCKET_INLINED_ENTRY_LIST, in,
           new ClsBucketIndexOpCtx<rgw_cls_list_ret>(result, NULL));
 }
 
-void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance)
+void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance, int lease_hold_interval)
 {
   bufferlist in;
   rgw_cls_list_op call;
   call.rgw_instance = rgw_instance;
+  call.lease_hold_interval_ms = lease_hold_interval;
   encode(call, in);
 
   op.exec(RGW_CLASS, RGW_BUCKET_SHARD_ACQUIRE_LEASE, in);

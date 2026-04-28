@@ -1592,3 +1592,5 @@ OPTION(rgw_trash_debug_inject_error_after_obj_restore, OPT_U64) // dev option to
 OPTION(rgw_inlined_obj_detach_interval, OPT_INT)
 OPTION(rgw_detach_max_worker, OPT_INT)
 OPTION(rgw_detach_max_wp_worker, OPT_INT)
+OPTION(rgw_detach_list_batch_num, OPT_INT)
+OPTION(rgw_detach_lease_hold_interval_ms, OPT_INT)

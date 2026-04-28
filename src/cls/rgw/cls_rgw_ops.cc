@@ -306,6 +306,7 @@ void rgw_cls_list_op::dump(Formatter *f) const
   f->dump_string("start_obj", start_obj.name);
   f->dump_unsigned("num_entries", num_entries);
   f->dump_string("rgw_instance", rgw_instance);
+  f->dump_int("lease_hold_interval_ms", lease_hold_interval_ms);
 }
 
 void rgw_cls_list_ret::generate_test_instances(list<rgw_cls_list_ret*>& o)

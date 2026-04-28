@@ -605,6 +605,7 @@ public:
     bool going_down();
     rgw::sal::RGWRadosStore* get_store();
     int get_index(){ return ix; }
+    CephContext * ctx(){return cct;}
     ~DCWorker();
 };
 

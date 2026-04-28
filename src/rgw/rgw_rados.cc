@@ -4092,21 +4092,22 @@ void *DCWorkQ::entry() {
     string oid = shardItem.oid;
     librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
 
-    int num_entries = 32;
+    int num_entries = wk->ctx()->_conf->rgw_detach_list_batch_num;
+    int hold_interval = wk->ctx()->_conf->rgw_detach_lease_hold_interval_ms;
     bool truncated = true;
     cls_rgw_obj_key start_obj;
     while (truncated) {
       rgw_cls_list_ret result;
       librados::ObjectReadOperation op;
       cls_rgw_bucket_inlined_entry_list_op(op, start_obj,
-                                           num_entries, shardItem.rgw_instance, &result);
+                                           num_entries, shardItem.rgw_instance, hold_interval, &result);
       r = rgw_rados_operate(dpp, ioctx, oid, &op, nullptr, null_yield);
       if(r == -ECANCELED){
         // we lost the shard lease
         ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << " lost the shard lease, bucket: " << shardItem.bucket.name
                            << " shard:" << shardItem.oid  << dendl;
         librados::ObjectWriteOperation reacquire_op;
-        cls_rgw_bucket_shard_acquire_lease(reacquire_op, shardItem.rgw_instance);
+        cls_rgw_bucket_shard_acquire_lease(reacquire_op, shardItem.rgw_instance, hold_interval);
         int rc = rgw_rados_operate(dpp, ioctx, oid, &reacquire_op, null_yield);
         if (rc < 0 ) {
           ldpp_dout(dpp, 1) << "WARNING DC WorkerQ[" << thr_name() << "] list bucket: " << shardItem.bucket.name
@@ -4379,6 +4380,9 @@ void RGWRadosDetacher::swap_modified_buckets(map<rgw_bucket, rgw_placement_rule>
 }
 
 int RGWRadosDetacher::detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule, std::string &rgw_instance) {
+  if(workers.empty()){
+    return 0;
+  }
   string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
   //idx of DCWorker that handle this buckets inlined tiny objects
   int index = ceph_str_hash_linux(bucket_id.c_str(), bucket_id.size()) % HASH_PRIME % workers.size();

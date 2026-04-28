@@ -1441,9 +1441,14 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
     return 0;
   }
 
+  auto interval = std::chrono::duration<int, std::ratio<1, 1000>>(op.lease_hold_interval_ms);
+  utime_t    give_up (new_dir.header.acquire_time+interval);
+  utime_t  now(ceph::real_clock::now());
+  CLS_LOG(20, "%s: , holder: %s give up time: %ld, now: %ld interval_ms: %d", __func__, new_dir.header.rgw_instance_hold_lease.c_str(),
+          give_up.to_msec(), now.to_msec() ,op.lease_hold_interval_ms);
   if (new_dir.header.rgw_instance_hold_lease != op.rgw_instance ||
-      new_dir.header.acquire_time + 3s < ceph::real_clock::now()){
-    CLS_LOG(10, "WARNING: %s:  rgw %s ailed to acquire shard list lease", __func__, op.rgw_instance.c_str());
+      new_dir.header.acquire_time + interval < ceph::real_clock::now()){
+    CLS_LOG(10, "WARNING: %s:  rgw %s failed to acquire shard list lease", __func__, op.rgw_instance.c_str());
     return -ECANCELED;
   }
 
@@ -1570,11 +1575,16 @@ int rgw_bucket_shard_acquire_lease(cls_method_context_t hctx, bufferlist *in, bu
     return rc;
   }
 
-  if (header.rgw_instance_hold_lease.empty() || header.acquire_time +3s < ceph::real_clock::now()){
+  auto interval = std::chrono::duration<int, std::ratio<1, 1000>>(op.lease_hold_interval_ms);
+  if (header.rgw_instance_hold_lease.empty() || header.acquire_time + interval < ceph::real_clock::now()){
     header.rgw_instance_hold_lease = op.rgw_instance;
     header.acquire_time = ceph::real_clock::now();
   }else {
-    return -EINVAL;
+    utime_t    give_up(header.acquire_time + interval);
+    utime_t  now(ceph::real_clock::now());
+    CLS_LOG(20, "%s: failed acquire lease, holder: %s give up time: %ld, now: %ld interval_ms: %d", __func__, header.rgw_instance_hold_lease.c_str(),
+            give_up.to_msec(), now.to_msec() ,op.lease_hold_interval_ms);
+    return -ECANCELED;
   }
 
   return write_bucket_header(hctx, &header);
