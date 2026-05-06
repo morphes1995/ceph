@@ -4126,7 +4126,8 @@ void *DCWorkQ::entry() {
 
       truncated = result.is_truncated;
       start_obj = result.marker;
-
+      ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance
+                        << " read [" << result.dir.m.size() <<"] entries from shard " << shardItem.oid  <<dendl;
       batch_detach_parallel(shardItem, result.dir.m);
     } // listed all shard inlined objects
 
@@ -4134,11 +4135,75 @@ void *DCWorkQ::entry() {
   return nullptr;
 }
 
-void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries){
-  if (entries.empty()){
-    return;
-  }
+struct detach_head_op_data {
+    rgw::sal::RGWRadosStore* store;
+    const DoutPrefixProvider *dpp;
+    RGWObjManifest manifest;
+    string tag;
+    rgw_obj obj;
+    uint64_t inline_index_epoch;
 
+    ceph::mutex *lock;
+    ceph::condition_variable *cond;
+    list<rgw_bucket_inlined_entry> *detached_entries;
+    uint64_t total_entries_cnt;
+
+
+    void handle_completion(completion_t cb){
+      int r = rados_aio_get_return_value(cb);
+      // we failed in race condition: 1) obj was modified, 2) obj was created, 3) obj was deleted
+      if (r == -ECANCELED || r == -EEXIST || r == -ENOENT){
+        r = 0;
+      }
+
+      cls_rgw_obj_chain chain;
+      if (r < 0) {
+        goto done;
+      }
+
+      // detach succeed
+      // gc tails
+
+      store->getRados()->update_gc_chain(dpp, obj, manifest , &chain);
+      if (chain.empty()) {
+        goto done;
+      }
+      if (store->getRados()->get_gc() == nullptr) {
+        ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
+        //Delete objects inline just in case gc hasn't been initialised, prevents crashes
+        store->getRados()->delete_objs_inline(dpp, chain, tag);
+      } else {
+        auto [ret, leftover_chain] = store->getRados()->get_gc()->send_split_chain(chain, tag); // do it synchronously
+        if (ret < 0 && leftover_chain) {
+          //Delete objects inline if send chain to gc fails
+          store->getRados()->delete_objs_inline(dpp, *leftover_chain, tag);
+        }
+      }
+
+    done:
+      rgw_bucket_inlined_entry d;
+      d.key = cls_rgw_obj_key(obj.key.name);
+      d.tag = tag;
+      d.inline_index_epoch = inline_index_epoch;
+      d.r = r;
+
+      std::lock_guard l{*lock};
+      detached_entries->push_back(d);
+      if(detached_entries->size() == total_entries_cnt){
+          cond->notify_one();
+      }
+    }
+};
+
+static void detach_head_cb(completion_t cb, void *arg)
+{
+  detach_head_op_data *completion = (detach_head_op_data *)arg;
+  completion->handle_completion(cb);
+  delete completion;
+}
+
+void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries){
+  list<rgw_bucket_dir_entry> entries_to_detach;
   list<rgw_bucket_inlined_entry> detached_entries;
   for (auto &entry: entries) {
     rgw_bucket_dir_entry &dirent = entry.second;
@@ -4148,35 +4213,49 @@ void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat
       d.tag = dirent.tag;
       d.inline_index_epoch = dirent.meta.inline_index_epoch;
       detached_entries.push_back(d);
-
       continue;
     }
+    entries_to_detach.push_back(entry.second);
+  }
 
-    int r = _refresh_head(shardItem, dirent);
+  if(entries_to_detach.empty()){
+    return;
+  }
+
+  ceph::mutex lock = ceph::make_mutex("ParallelDetachHead::lock");
+  ceph::condition_variable cond;
+  uint64_t total_cnt = entries.size();
+  for (auto &entry: entries_to_detach) {
+    int r = _rebuild_head_async(shardItem, entry, &detached_entries, total_cnt, &lock, &cond);
     ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << " detaching bucket: " << shardItem.bucket.name
-                       << " shard:" << shardItem.oid << " object " << dirent.key.name << " r:" << r <<dendl;
-    if(r >= 0){
-      // detach succeed
-      rgw_bucket_inlined_entry d;
-      d.key = dirent.key;
-      d.tag = dirent.tag;
-      d.inline_index_epoch = dirent.meta.inline_index_epoch;
+                       << " shard:" << shardItem.oid << " object " << entry.key.name << " r:" << r <<dendl;
+  }
+  std::unique_lock l(lock);
+  while(detached_entries.size() < total_cnt){
+    cond.wait(l);
+  }
 
-      detached_entries.push_back(d);
+  list<rgw_bucket_inlined_entry> final_detached_entries;
+  for (auto &entry: detached_entries) {
+    if (entry.r < 0){
+      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] rebuild head["<< entry.key.name <<"] failed, r= : " <<  entry.r << dendl;
+      continue;
     }
+    final_detached_entries.push_back(entry);
   }
 
   librados::ObjectWriteOperation op;
   string oid = shardItem.oid;
   librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
-  cls_rgw_bucket_clear_inlined_entry_data_op(op, detached_entries);
+  cls_rgw_bucket_clear_inlined_entry_data_op(op, final_detached_entries);
   int r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
   if (r < 0)
     ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] clear entries inlined data : " << shardItem.bucket.name
                       << " shard:" << shardItem.oid << " r: " << r << dendl;
 }
 
-int DCWorkQ::_refresh_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent){
+int DCWorkQ::_rebuild_head_async(ShardItem &shardItem, rgw_bucket_dir_entry &dirent,
+                           list<rgw_bucket_inlined_entry> *detached_entries, uint64_t total_cnt, ceph::mutex *lock, ceph::condition_variable *cond){
   ceph_assert(dirent.meta.inline_head);
   rgw::sal::RGWRadosStore *store = get_store();
   rgw_obj obj(shardItem.bucket, dirent.key.name);
@@ -4216,6 +4295,20 @@ int DCWorkQ::_refresh_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent){
 
   // 2. encapsulate write op
   ObjectWriteOperation op;
+  detach_head_op_data *entry = new detach_head_op_data();
+  entry->manifest = manifest;
+  entry->store = store;
+  entry->dpp = dpp;
+  entry->tag = dirent.tag;
+  entry->obj = obj;
+
+  entry->lock = lock;
+  entry->cond = cond;
+  entry->total_entries_cnt = total_cnt;
+  entry->inline_index_epoch = dirent.meta.inline_index_epoch;
+  entry->detached_entries = detached_entries;
+
+  AioCompletion *c = librados::Rados::aio_create_completion(entry, detach_head_cb);
 
   if (dirent.exists){
     // case 1: write head
@@ -4246,13 +4339,9 @@ int DCWorkQ::_refresh_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent){
 
 
     auto& ioctx = ref.pool.ioctx();
-    r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, null_yield);
+    r = ioctx.aio_operate(ref.obj.oid, c, &op);
     if (r < 0) {
       ldpp_dout(dpp, 1) << "WARNING DC WorkerQ[" << thr_name() << "] failed to write back the head, obj :" << dirent.key.name << " r: " << r << dendl;
-      // we failed in race condition: 1) obj was modified, 2) obj was created, 3) obj was deleted
-      if (r == -ECANCELED || r == -EEXIST || r == -ENOENT){
-        r = 0;
-      }
       return r;
     }
   } else {
@@ -4268,32 +4357,10 @@ int DCWorkQ::_refresh_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent){
     cls_rgw_remove_obj(op, prefixes);
 
     auto& ioctx = ref.pool.ioctx();
-    r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, null_yield);
+    r = ioctx.aio_operate(ref.obj.oid, c, &op);
     if (r < 0) {
       ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to delete back the head, obj :" << dirent.key.name << " r: " << r << dendl;
-      // we failed in race condition:  1) obj was modified, 2) obj was deleted
-      if (r == -ECANCELED || r == -ENOENT){
-        r = 0;
-      }
-    }
-  }
-
-  // gc tails
-  cls_rgw_obj_chain chain;
-  store->getRados()->update_gc_chain(dpp, obj, manifest , &chain);
-  if (chain.empty()) {
-    return 0;
-  }
-  string tag = dirent.tag;
-  if (store->getRados()->get_gc() == nullptr) {
-    ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
-    //Delete objects inline just in case gc hasn't been initialised, prevents crashes
-    store->getRados()->delete_objs_inline(dpp, chain, tag);
-  } else {
-    auto [ret, leftover_chain] = store->getRados()->get_gc()->send_split_chain(chain, tag); // do it synchronously
-    if (ret < 0 && leftover_chain) {
-      //Delete objects inline if send chain to gc fails
-      store->getRados()->delete_objs_inline(dpp, *leftover_chain, tag);
+      return r;
     }
   }
 

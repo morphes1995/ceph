@@ -6077,7 +6077,7 @@ std::vector<Option> get_rgw_options() {
                     "Number of Detacher tasks that will run in parallel "),
 
     Option("rgw_detach_max_wp_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(4)
+            .set_default(2)
             .set_description("Number of workpool threads per DCWorker")
             .set_long_description("Number of workpool threads per DCWorker"),
 

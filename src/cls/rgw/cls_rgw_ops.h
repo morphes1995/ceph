@@ -489,6 +489,7 @@ struct rgw_bucket_inlined_entry {
     cls_rgw_obj_key key;
     std::string tag;
     uint64_t inline_index_epoch;
+    int r;
 
     rgw_bucket_inlined_entry() : inline_index_epoch(0) {}
 
