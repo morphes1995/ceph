@@ -312,6 +312,8 @@ void BucketAsyncRefreshHandler::handle_response(const int r)
     bs.size += s.size;
     bs.size_rounded += s.size_rounded;
     bs.num_objects += s.num_objects;
+    bs.inlined_entry_num += s.inlined_entry_num;
+    bs.inlined_total_entry_size = s.inlined_total_entry_size;
   }
 
   cache->async_refresh_response(user, bucket, bs, tiny_object_inline, stats_refresh_interval);
@@ -374,6 +376,8 @@ int RGWBucketStatsCache::fetch_stats_from_storage(const rgw_user& user, const rg
     stats.size += s.size;
     stats.size_rounded += s.size_rounded;
     stats.num_objects += s.num_objects;
+    stats.inlined_entry_num += s.inlined_entry_num;
+    stats.inlined_total_entry_size += s.inlined_total_entry_size;
   }
 
   return 0;
@@ -953,10 +957,9 @@ public:
   bool reach_tiny_obj_inline_max_quota_threshold(const rgw_user& user,
                                                  rgw_bucket& bucket,
                                                  RGWQuotaInfo& bucket_quota, bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                 int inlined_obj_max_size_mb,
                                                  optional_yield y) override {
-    if (!bucket_quota.enabled) {
-      return false;
-    }
+
     const DoutPrefix dp(store->ctx(), dout_subsys, "rgw quota handler: ");
     RGWStorageStats bucket_stats;
     int ret = bucket_stats_cache.get_stats(user, bucket, bucket_stats, tiny_object_inline, stats_refresh_interval, y, &dp);
@@ -965,6 +968,16 @@ public:
       return true;
     }
     ldout(store->ctx(), 20) << __func__ << "bucket_stats num_objects:  " << bucket_stats.num_objects << " bucket_stats size:  " << bucket_stats.size << dendl;
+
+    if((bucket_stats.inlined_total_entry_size >>10 >> 10) >inlined_obj_max_size_mb ){
+      ldout(store->ctx(), 20) << __func__ << "bucket " << bucket.name << " contains too many inlined objects, size(mb):  "
+                              << bucket_stats.inlined_total_entry_size <<" inlined_obj_max_size_mb:"<< inlined_obj_max_size_mb << dendl;
+      return true;
+    }
+
+    if (!bucket_quota.enabled) {
+      return false;
+    }
 
     bool obj_num_reached = false;
     if (bucket_quota.max_objects > 0 && bucket_stats.num_objects > bucket_quota.max_objects * ((double)max_quota_pct_to_allow_inline/100)){

@@ -2149,7 +2149,7 @@ RGWBucketInfo::~RGWBucketInfo()
 }
 
 void RGWBucketInfo::encode(bufferlist& bl) const {
-  ENCODE_START(25, 4, bl);
+  ENCODE_START(26, 4, bl);
   encode(bucket, bl);
   encode(owner.id, bl);
   encode(flags, bl);
@@ -2188,6 +2188,7 @@ void RGWBucketInfo::encode(bufferlist& bl) const {
   encode(bucket_stats_refresh_interval, bl);
   encode(max_quota_pct_to_allow_inline, bl);
   encode(tiny_object_size_kb_threshold, bl);
+  encode(inlined_obj_max_size_mb, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -2277,6 +2278,9 @@ void RGWBucketInfo::decode(bufferlist::const_iterator& bl) {
     decode(bucket_stats_refresh_interval, bl);
     decode(max_quota_pct_to_allow_inline, bl);
     decode(tiny_object_size_kb_threshold, bl);
+  }
+  if (struct_v >= 26) {
+    decode(inlined_obj_max_size_mb, bl);
   }
 
   if (layout.logs.empty() &&

@@ -1047,6 +1047,7 @@ struct RGWBucketInfo {
   int bucket_stats_refresh_interval{10};
   int max_quota_pct_to_allow_inline{80};
   int tiny_object_size_kb_threshold{128};
+  int inlined_obj_max_size_mb{0};
 
   void encode(bufferlist& bl) const;
   void decode(bufferlist::const_iterator& bl);

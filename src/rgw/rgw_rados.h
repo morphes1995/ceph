@@ -1957,6 +1957,7 @@ public:
 		  optional_yield y, bool check_size_only = false);
   bool reach_tiny_obj_inline_max_quota_threshold(const rgw_user& bucket_owner, rgw_bucket& bucket, RGWQuotaInfo& bucket_quota,
                                                 bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                int inlined_obj_max_size_mb,
                                                 optional_yield y);
 
   int check_bucket_shards(const RGWBucketInfo& bucket_info, const rgw_bucket& bucket,

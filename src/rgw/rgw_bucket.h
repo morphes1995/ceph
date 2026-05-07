@@ -269,6 +269,7 @@ struct RGWBucketAdminOpState {
   int stats_refresh_interval;
   int max_quota_pct;
   int tiny_obj_size_kb;
+  int inlined_obj_max_size_mb;
 
   int max_aio = 0;
 
@@ -312,6 +313,7 @@ struct RGWBucketAdminOpState {
   void set_stats_refresh_interval(int value) { stats_refresh_interval = value; }
   void set_max_quota_pct(int value) { max_quota_pct = value; }
   void set_tiny_obj_size_kb(int value) { tiny_obj_size_kb = value; }
+  void set_inlined_obj_max_size_mb(int value) { inlined_obj_max_size_mb = value; }
 
   rgw_user& get_user_id() { return uid; }
   std::string& get_user_display_name() { return display_name; }

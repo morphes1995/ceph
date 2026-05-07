@@ -324,7 +324,8 @@ int RGWRadosBucket::check_quota(RGWQuotaInfo& user_quota, RGWQuotaInfo& bucket_q
 
 bool RGWRadosBucket::reach_tiny_obj_inline_max_quota_threshold(optional_yield y){
   return store->getRados()->reach_tiny_obj_inline_max_quota_threshold(info.owner, get_key(), info.quota,
-                                                                      info.tiny_obj_inline_enabled(), info.bucket_stats_refresh_interval, info.max_quota_pct_to_allow_inline, y);
+                                                                      info.tiny_obj_inline_enabled(), info.bucket_stats_refresh_interval, info.max_quota_pct_to_allow_inline,
+                                                                      info.inlined_obj_max_size_mb, y);
 }
 
 int RGWRadosBucket::set_instance_attrs(const DoutPrefixProvider *dpp, RGWAttrs& attrs, optional_yield y)

@@ -1230,6 +1230,9 @@ int RGWBucket::obj_inline_config(RGWBucketAdminOpState &op_state, const DoutPref
     }
     bucket_info.tiny_object_size_kb_threshold = op_state.tiny_obj_size_kb;
   }
+  if (op_state.inlined_obj_max_size_mb >= 0 ) {
+    bucket_info.inlined_obj_max_size_mb = op_state.inlined_obj_max_size_mb;
+  }
 
   // update bucket info
   r = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &attrs, dpp);
@@ -1580,6 +1583,7 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   formatter->dump_int("tiny_object_size_threshold_kb", bucket_info.tiny_object_size_kb_threshold);
   formatter->dump_int("bucket_stats_refresh_interval_sec", bucket_info.bucket_stats_refresh_interval);
   formatter->dump_int("max_quota_allowed_pct", bucket_info.max_quota_pct_to_allow_inline);
+  formatter->dump_int("inlined_obj_max_size_mb", bucket_info.inlined_obj_max_size_mb);
 
   // bucket tags
   auto iter = attrs.find(RGW_ATTR_TAGS);

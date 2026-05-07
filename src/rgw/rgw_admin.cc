@@ -3171,6 +3171,7 @@ int main(int argc, const char **argv)
   int stats_refresh_interval = -1;
   int max_quota_pct = -1;
   int tiny_obj_size_kb = -1;
+  int inlined_obj_max_size_mb = -1;
 
   int warnings_only = false;
   int inconsistent_index = false;
@@ -3522,6 +3523,16 @@ int main(int argc, const char **argv)
       }
       if (tiny_obj_size_kb < 0) {
         cerr << "ERROR: tiny_obj_size_kb must >= 0" << std::endl;
+        return EINVAL;
+      }
+    }else if (ceph_argparse_witharg(args, i, &val, "--inlined_obj_max_size_mb", (char*)NULL)) {
+      inlined_obj_max_size_mb = (int) strict_strtol(val.c_str(), 10, &err);
+      if (!err.empty()) {
+        cerr << "ERROR: failed to parse inlined_obj_max_size_mb: " << err << std::endl;
+        return EINVAL;
+      }
+      if (inlined_obj_max_size_mb < 0) {
+        cerr << "ERROR: inlined_obj_max_size_mb must >= 0" << std::endl;
         return EINVAL;
       }
     }else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
@@ -8262,6 +8273,8 @@ next:
       bucket_op.set_max_quota_pct(max_quota_pct);
     if (tiny_obj_size_kb >= 0 )
       bucket_op.set_tiny_obj_size_kb(tiny_obj_size_kb);
+    if (inlined_obj_max_size_mb >=0)
+      bucket_op.set_inlined_obj_max_size_mb(inlined_obj_max_size_mb);
 
     bucket_op.set_tenant(tenant);
     string err_msg;

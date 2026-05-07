@@ -809,6 +809,7 @@ void RGWBucketInfo::dump(Formatter *f) const
   encode_json("bucket_stats_refresh_interval", bucket_stats_refresh_interval, f);
   encode_json("max_quota_pct_to_allow_inline", max_quota_pct_to_allow_inline, f);
   encode_json("tiny_object_size_kb_threshold", tiny_object_size_kb_threshold, f);
+  encode_json("inlined_obj_max_size_mb", inlined_obj_max_size_mb, f);
 }
 
 void RGWBucketInfo::decode_json(JSONObj *obj) {

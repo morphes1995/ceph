@@ -11134,10 +11134,11 @@ int RGWRados::check_quota(const rgw_user& bucket_owner, rgw_bucket& bucket,
 }
 bool RGWRados::reach_tiny_obj_inline_max_quota_threshold(const rgw_user& bucket_owner, rgw_bucket& bucket, RGWQuotaInfo& bucket_quota,
                                                         bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                        int inlined_obj_max_size_mb,
                                                         optional_yield y)
 {
   return quota_handler->reach_tiny_obj_inline_max_quota_threshold(bucket_owner, bucket, bucket_quota,
-                                                                  tiny_object_inline, stats_refresh_interval, max_quota_pct_to_allow_inline, y);
+                                                                  tiny_object_inline, stats_refresh_interval, max_quota_pct_to_allow_inline, inlined_obj_max_size_mb, y);
 }
 
 int RGWRados::get_target_shard_id(const rgw::bucket_index_normal_layout& layout, const string& obj_key,

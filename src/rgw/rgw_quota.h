@@ -104,6 +104,7 @@ public:
                                                          rgw_bucket& bucket,
                                                          RGWQuotaInfo& bucket_quota,
                                                          bool tiny_object_inline, int stats_refresh_interval, int max_quota_pct_to_allow_inline,
+                                                         int inlined_obj_max_size_mb,
                                                          optional_yield y) = 0;
 
   virtual void check_bucket_shards(uint64_t max_objs_per_shard, uint64_t num_shards,
