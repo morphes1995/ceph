@@ -4099,6 +4099,7 @@ void *DCWorkQ::entry() {
     while (truncated) {
       rgw_cls_list_ret result;
       librados::ObjectReadOperation op;
+      cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
       cls_rgw_bucket_inlined_entry_list_op(op, start_obj,
                                            num_entries, shardItem.rgw_instance, hold_interval, &result);
       r = rgw_rados_operate(dpp, ioctx, oid, &op, nullptr, null_yield);
@@ -4247,6 +4248,7 @@ void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat
   librados::ObjectWriteOperation op;
   string oid = shardItem.oid;
   librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
+  cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
   cls_rgw_bucket_clear_inlined_entry_data_op(op, final_detached_entries);
   int r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
   if (r < 0)
@@ -4453,6 +4455,10 @@ int RGWRadosDetacher::detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule
   string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
   //idx of DCWorker that handle this buckets inlined tiny objects
   int index = ceph_str_hash_linux(bucket_id.c_str(), bucket_id.size()) % HASH_PRIME % workers.size();
+
+  if(workers[index]->wq_size() == 0){
+    return 0;
+  }
 
   RGWSI_RADOS::Pool index_pool;
   RGWBucketInfo info;

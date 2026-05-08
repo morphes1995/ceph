@@ -802,6 +802,8 @@ int rgw_bucket_update_stats(cls_method_context_t hctx, bufferlist *in, bufferlis
       dest.total_size_rounded += s.second.total_size_rounded;
       dest.num_entries += s.second.num_entries;
       dest.actual_size += s.second.actual_size;
+      dest.inlined_total_entry_size += s.second.inlined_total_entry_size;
+      dest.inlined_entry_num += s.second.inlined_entry_num;
     }
   }
 
@@ -3656,6 +3658,92 @@ static int list_olh_entries(cls_method_context_t hctx,
   return count;
 }
 
+static int list_inlined_index_entries(cls_method_context_t hctx,
+                            const string& name,
+                            const string& marker,
+                            uint32_t max,
+                            list<rgw_cls_bi_entry> *entries,
+                            bool *pmore)
+{
+  cls_rgw_obj_key key(name);
+  string first_inlined_idx;
+  encode_inlined_entry_key(key, &first_inlined_idx);
+  string start_after_key;
+
+  if (!name.empty()) {
+    start_after_key = first_inlined_idx;
+  } else {
+    start_after_key = BI_PREFIX_CHAR;
+    start_after_key.append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
+  }
+  string filter = start_after_key;
+  if (bi_entry_gt(marker, start_after_key)) {
+    start_after_key = marker;
+  }
+  int count = 0;
+  map<string, bufferlist> keys;
+  int ret;
+  bufferlist k;
+  ret = cls_cxx_map_get_val(hctx, start_after_key, &k);
+  if (ret < 0 && ret != -ENOENT) {
+    return ret;
+  }
+  // we need to include the exact match if a filter (name) is
+  // specified and the marker has not yet advanced (i.e., been set)
+  bool found_first = (ret == 0) && (start_after_key != marker);
+  if (found_first) {
+    --max;
+  }
+  if (max > 0) {
+    ret = cls_cxx_map_get_vals(hctx, start_after_key, string(), max,
+                               &keys, pmore);
+    CLS_LOG(20, "%s: start_after_key=\"%s\", first_instance_idx=\"%s\", keys.size()=%d",
+            __func__, escape_str(start_after_key).c_str(),
+            escape_str(first_inlined_idx).c_str(), (int)keys.size());
+    if (ret < 0) {
+      return ret;
+    }
+  }
+
+  if (found_first) {
+    keys[start_after_key] = std::move(k);
+  }
+
+  for (auto iter = keys.begin(); iter != keys.end(); ++iter) {
+    rgw_cls_bi_entry entry;
+    entry.type = BIIndexType::InlinedIdx;
+    entry.idx = iter->first;
+    entry.data = iter->second;
+
+    if (!filter.empty() && entry.idx.compare(0, filter.size(), filter) != 0) {
+      /* we are skipping the rest of the entries */
+      if (pmore) {
+        *pmore = false;
+      }
+      return count;
+    }
+
+    CLS_LOG(20, "%s: entry.idx=\"%s\"", __func__, escape_str(entry.idx).c_str());
+
+    cls_rgw_obj_key key;
+    decode_inlined_entry_key(entry.idx, &key);
+
+    if (!name.empty() && key.name != name) {
+      /* we are skipping the rest of the entries */
+      if (pmore) {
+        *pmore = false;
+      }
+      return count;
+    }
+
+    entries->push_back(entry);
+    count++;
+    start_after_key = entry.idx;
+  }
+
+  return count;
+}
+
 /* Lists all the entries that appear in a bucket index listing.
  *
  * It may not be obvious why this function calls three other "segment"
@@ -3730,6 +3818,17 @@ static int rgw_bi_list_op(cls_method_context_t hctx,
     ret = list_olh_entries(hctx, op.name_filter, op.marker, max - count, &op_ret.entries, &more);
     if (ret < 0) {
       CLS_LOG(0, "ERROR: %s: list_olh_entries returned ret=%d", __func__, ret);
+      return ret;
+    }
+
+    count += ret;
+    CLS_LOG(20, "%s: found %d olh entries, count=%u", __func__, ret, count);
+  }
+
+  if (!more) {
+    ret = list_inlined_index_entries(hctx, op.name_filter, op.marker, max - count, &op_ret.entries, &more);
+    if (ret < 0) {
+      CLS_LOG(0, "ERROR: %s: list_inlined_index_entries returned ret=%d", __func__, ret);
       return ret;
     }
 

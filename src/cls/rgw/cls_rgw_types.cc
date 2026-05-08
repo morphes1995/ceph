@@ -274,6 +274,13 @@ static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *form
         encode_json("entry", entry, formatter);
       }
       break;
+    case BIIndexType::InlinedIdx:
+      {
+        rgw_bucket_inlined_entry_index entry;
+        decode(entry, iter);
+        encode_json("entry", entry, formatter);
+      }
+      break;
     default:
       break;
   }
@@ -289,7 +296,9 @@ void rgw_cls_bi_entry::decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key)
     type = BIIndexType::Instance;
   } else if (s == "olh") {
     type = BIIndexType::OLH;
-  } else {
+  }else if (s == "inlined_idx") {
+    type = BIIndexType::InlinedIdx;
+  }else {
     type = BIIndexType::Invalid;
   }
   using ceph::encode;
@@ -317,6 +326,20 @@ void rgw_cls_bi_entry::decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key)
         }
       }
       break;
+    case BIIndexType::InlinedIdx:
+      {
+        rgw_bucket_inlined_entry_index entry;
+        JSONDecoder::decode_json("entry", entry, obj);
+        encode(entry, data);
+
+        if (effective_key) {
+          cls_rgw_obj_key key;
+          key.name = idx.substr(6);
+          key.instance ="";
+          *effective_key = key;
+        }
+      }
+      break;
     default:
       break;
   }
@@ -334,6 +357,9 @@ void rgw_cls_bi_entry::dump(Formatter *f) const
     break;
   case BIIndexType::OLH:
     type_str = "olh";
+    break;
+  case BIIndexType::InlinedIdx:
+    type_str = "inlined_idx";
     break;
   default:
     type_str = "invalid";
@@ -372,6 +398,20 @@ bool rgw_cls_bi_entry::get_info(cls_rgw_obj_key *key,
         rgw_bucket_olh_entry entry;
         decode(entry, iter);
         *key = entry.key;
+      }
+      break;
+    case BIIndexType::InlinedIdx:
+      {
+        rgw_bucket_inlined_entry_index entry;
+        decode(entry, iter);
+        if(key){
+          key->name = idx.substr(6);
+          key->instance ="";
+        }
+        account = true;
+        *category = RGWObjCategory::Main;
+        accounted_stats->inlined_entry_num += 1;
+        accounted_stats->inlined_total_entry_size += entry.entry_size;
       }
       break;
     default:

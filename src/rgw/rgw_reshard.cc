@@ -132,6 +132,8 @@ public:
       target.total_size += entry_stats.total_size;
       target.total_size_rounded += entry_stats.total_size_rounded;
       target.actual_size += entry_stats.actual_size;
+      target.inlined_entry_num += entry_stats.inlined_entry_num;
+      target.inlined_total_entry_size += entry_stats.inlined_total_entry_size;
     }
     if (entries.size() >= reshard_shard_batch_size) {
       int ret = flush();

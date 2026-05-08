@@ -969,9 +969,9 @@ public:
     }
     ldout(store->ctx(), 20) << __func__ << "bucket_stats num_objects:  " << bucket_stats.num_objects << " bucket_stats size:  " << bucket_stats.size << dendl;
 
-    if((bucket_stats.inlined_total_entry_size >>10 >> 10) >inlined_obj_max_size_mb ){
+    if( inlined_obj_max_size_mb > 0 && (bucket_stats.inlined_total_entry_size >>10 >> 10) >inlined_obj_max_size_mb ){
       ldout(store->ctx(), 20) << __func__ << "bucket " << bucket.name << " contains too many inlined objects, size(mb):  "
-                              << bucket_stats.inlined_total_entry_size <<" inlined_obj_max_size_mb:"<< inlined_obj_max_size_mb << dendl;
+                              << (bucket_stats.inlined_total_entry_size >> 10 >>10) <<" inlined_obj_max_size_mb:"<< inlined_obj_max_size_mb << dendl;
       return true;
     }
 

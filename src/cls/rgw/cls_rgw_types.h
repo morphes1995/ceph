@@ -580,6 +580,7 @@ enum class BIIndexType : uint8_t {
   Plain      = 1,
   Instance   = 2,
   OLH        = 3,
+  InlinedIdx = 4,
 };
 
 struct rgw_bucket_category_stats;
