@@ -684,13 +684,54 @@ public:
         }
     };
     DetachThread *detach_thread;
+
+    /* thread, monitor object inline disabling buckets */
+    class DisableThread : public Thread {
+        CephContext *cct;
+        RGWRadosDetacher *dc;
+        ceph::mutex lock = ceph::make_mutex("RGWRadosDetacher::DisableThread");
+        ceph::condition_variable cond;
+    public:
+
+        DisableThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
+
+        void *entry() override {
+          ldout(cct, 20) << "DisableThread: start" << dendl;
+          do {
+            sleep(10);
+            if (dc->going_down())
+              break;
+
+            vector<string> inlined_buckets;
+            int r =dc->list_entry(inlined_buckets, true); // only list disabling buckets
+            if(r < 0 && r != -ENOENT)
+              continue;
+
+            for(auto bucket_id: inlined_buckets){
+              dc->try_disable_object_inline(bucket_id);
+            }
+          } while (!dc->going_down());
+
+          ldout(cct, 20) << "DisableThread: done" << dendl;
+          return NULL;
+        }
+
+        void stop() {}
+    };
+    DisableThread *disable_thread;
+
     std::vector<std::unique_ptr<DCWorker>> workers;
 
     RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGWRadosStore *_store, bool use_detacher);
-    void initialize(); // todo  init when rgw restart
+    int initialize();
     void bucket_has_inlined_obj(rgw_bucket& bucket, rgw_placement_rule &placement_rule);
     void swap_modified_buckets(map<rgw_bucket, rgw_placement_rule>& out);
     int detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule, std::string &rgw_instance);
+    void try_disable_object_inline(string &bucket_id);
+
+    int set_entry(rgw_bucket &bucket, bool disabling);
+    int rm_entry(rgw_bucket &bucket);
+    int list_entry(vector<string>& buckets, bool only_disabling);
 
     ~RGWRadosDetacher() {
       stop();
@@ -719,6 +760,7 @@ private:
       {
         std::unique_lock lock{mutex};
         stop_thread(&detach_thread);
+        stop_thread(&disable_thread);
       }
     }
 };
@@ -744,6 +786,7 @@ class RGWRados
   int open_root_pool_ctx(const DoutPrefixProvider *dpp);
   int open_gc_pool_ctx(const DoutPrefixProvider *dpp);
   int open_lc_pool_ctx(const DoutPrefixProvider *dpp);
+  int open_inline_pool_ctx(const DoutPrefixProvider *dpp);
   int open_objexp_pool_ctx(const DoutPrefixProvider *dpp);
   int open_reshard_pool_ctx(const DoutPrefixProvider *dpp);
   int open_notif_pool_ctx(const DoutPrefixProvider *dpp);
@@ -830,6 +873,7 @@ protected:
 
   librados::IoCtx gc_pool_ctx;        // .rgw.gc
   librados::IoCtx lc_pool_ctx;        // .rgw.lc
+  librados::IoCtx inline_pool_ctx;        // .rgw.lc
   librados::IoCtx objexp_pool_ctx;
   librados::IoCtx reshard_pool_ctx;
   librados::IoCtx notif_pool_ctx;     // .rgw.notif
@@ -879,6 +923,10 @@ public:
     return lc;
   }
 
+  RGWRadosDetacher *get_dc() {
+    return dc;
+  }
+
   RGWGC *get_gc() {
     return gc;
   }
@@ -919,6 +967,10 @@ public:
 
   librados::IoCtx* get_lc_pool_ctx() {
     return &lc_pool_ctx;
+  }
+
+  librados::IoCtx* get_inline_pool_ctx() {
+    return &inline_pool_ctx;
   }
 
   librados::IoCtx& get_notif_pool_ctx() {

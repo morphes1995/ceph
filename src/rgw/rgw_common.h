@@ -1066,6 +1066,7 @@ struct RGWBucketInfo {
   bool trash_bin_enabled() const { return (flags & BUCKET_TRASH_ENABLED) != 0; }
   bool tiny_obj_inline_enabled() const { return (flags & BUCKET_TINY_OBJECT_INLINE_ENABLED) != 0; }
   bool tiny_obj_inline_disabled() const { return (flags & BUCKET_TINY_OBJECT_INLINE_DISABLED) != 0; }
+  bool tiny_obj_inline_disabling() const { return (flags & BUCKET_TINY_OBJECT_INLINE_DISABLING) != 0; }
 
   bool has_swift_versioning() const {
     /* A bucket may be versioned through one mechanism only. */

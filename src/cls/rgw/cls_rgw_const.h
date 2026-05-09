@@ -72,6 +72,11 @@ constexpr int RGWBIAdvanceAndRetryError = -EFBIG;
 #define RGW_LC_GET_HEAD "lc_get_head"
 #define RGW_LC_LIST_ENTRIES "lc_list_entries"
 
+/* inlined bucket list */
+#define RGW_INLINE_SET_ENTRY "inline_set_entry"
+#define RGW_INLINE_RM_ENTRY "inline_rm_entry"
+#define RGW_INLINED_BUCKETS_LIST "inlined_buckets_list"
+
 /* resharding */
 #define RGW_RESHARD_ADD "reshard_add"
 #define RGW_RESHARD_LIST "reshard_list"

@@ -1642,6 +1642,7 @@ int RGWZoneParams::fix_pool_names(const DoutPrefixProvider *dpp, optional_yield 
   control_pool = fix_zone_pool_dup(pools, name, ".rgw.control", control_pool);
   gc_pool = fix_zone_pool_dup(pools, name ,".rgw.log:gc", gc_pool);
   lc_pool = fix_zone_pool_dup(pools, name ,".rgw.log:lc", lc_pool);
+  inline_pool = fix_zone_pool_dup(pools, name ,".rgw.log:inline", inline_pool);
   log_pool = fix_zone_pool_dup(pools, name, ".rgw.log", log_pool);
   intent_log_pool = fix_zone_pool_dup(pools, name, ".rgw.log:intent", intent_log_pool);
   usage_log_pool = fix_zone_pool_dup(pools, name, ".rgw.log:usage", usage_log_pool);

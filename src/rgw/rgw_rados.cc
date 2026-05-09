@@ -1199,6 +1199,10 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp)
   if (ret < 0)
     return ret;
 
+  ret = open_inline_pool_ctx(dpp);
+  if (ret < 0)
+    return ret;
+
   ret = open_objexp_pool_ctx(dpp);
   if (ret < 0)
     return ret;
@@ -1422,6 +1426,11 @@ int RGWRados::open_gc_pool_ctx(const DoutPrefixProvider *dpp)
 int RGWRados::open_lc_pool_ctx(const DoutPrefixProvider *dpp)
 {
   return rgw_init_ioctx(dpp, get_rados_handle(), svc.zone->get_zone_params().lc_pool, lc_pool_ctx, true, true);
+}
+
+int RGWRados::open_inline_pool_ctx(const DoutPrefixProvider *dpp)
+{
+  return rgw_init_ioctx(dpp, get_rados_handle(), svc.zone->get_zone_params().inline_pool, inline_pool_ctx, true, true);
 }
 
 int RGWRados::open_objexp_pool_ctx(const DoutPrefixProvider *dpp)
@@ -4422,7 +4431,14 @@ RGWRadosDetacher::RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGW
   if(use_detacher){
     detach_thread = new DetachThread(_store->ctx(), this);
     detach_thread->create("rgw_dc_thread");
+    disable_thread = new DisableThread(_store->ctx(), this);
+    disable_thread->create("dc_disable_thr");
+
     _init_worker();
+    int ret = initialize();
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "WARNING: failed to initialize RGWRadosDetacher r:" << ret << dendl;
+    }
   }
 }
 
@@ -4435,6 +4451,29 @@ void RGWRadosDetacher::_init_worker()
     auto worker  = std::make_unique<DCWorker>(dpp, cct, this, ix, max_wp);
     workers.emplace_back(std::move(worker));
   }
+}
+
+int RGWRadosDetacher::initialize(){
+  vector<string> inlined_buckets;
+  int r =list_entry(inlined_buckets, false);
+  if(r < 0 && r != -ENOENT)
+    return r;
+
+  for(auto bucket_id: inlined_buckets){
+    vector<std::string> fields;
+    boost::split(fields, bucket_id, boost::is_any_of(":"));
+    string bucket_tenant = fields[0];
+    string bucket_name = fields[1];
+    std::unique_ptr<rgw::sal::RGWBucket> bucket;
+    int ret = store->get_bucket(dpp, nullptr, bucket_tenant, bucket_name, &bucket, null_yield);
+    if (ret < 0){
+      return ret;
+    }
+
+    bucket_has_inlined_obj(bucket->get_key(), bucket->get_info().placement_rule);
+  }
+
+  return 0;
 }
 
 void RGWRadosDetacher::bucket_has_inlined_obj(rgw_bucket& bucket, rgw_placement_rule &placement_rule){
@@ -4479,6 +4518,80 @@ int RGWRadosDetacher::detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule
   workers[index]->enqueue_bucket(index_pool.ioctx(), shard_oids, bucket, rule, rgw_instance);
 
   return 0;
+}
+
+int RGWRadosDetacher::set_entry(rgw_bucket &bucket, bool disabling)
+{
+  string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
+  string oid = "inline.1";
+  return cls_rgw_inline_set_entry(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id, disabling);
+}
+
+int RGWRadosDetacher::rm_entry(rgw_bucket &bucket)
+{
+  string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
+  string oid = "inline.1";
+  return cls_rgw_inline_rm_entry(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id);
+}
+
+int RGWRadosDetacher::list_entry(vector<string>& buckets, bool only_disabling)
+{
+  string oid = "inline.1";
+  return cls_rgw_inlined_bucket_list(*store->getRados()->get_inline_pool_ctx(), oid, buckets, only_disabling);
+}
+
+void RGWRadosDetacher::try_disable_object_inline(string &bucket_id){
+
+  vector<std::string> fields;
+  boost::split(fields, bucket_id, boost::is_any_of(":"));
+  string bucket_tenant = fields[0];
+  string bucket_name = fields[1];
+  std::unique_ptr<rgw::sal::RGWBucket> bucket;
+  int ret = store->get_bucket(dpp, nullptr, bucket_tenant, bucket_name, &bucket, null_yield);
+  if (ret < 0){
+    ldpp_dout(dpp, 0) << __func__  <<"could not get bucket info for bucket="
+                      << bucket_name << dendl;
+    return;
+  }
+  bucket_has_inlined_obj(bucket->get_key(), bucket->get_info().placement_rule);
+
+  string bucket_ver;
+  string master_ver;
+  map<RGWObjCategory, RGWStorageStats> bucket_stats;
+  ret = store->getRados()->get_bucket_stats(dpp, bucket->get_info(), RGW_NO_SHARD, &bucket_ver,
+                                          &master_ver, bucket_stats, nullptr);
+  if (ret < 0) {
+    ldpp_dout(dpp, 0) << __func__  <<"could not get bucket stats for bucket="
+                      << bucket_name << dendl;
+    return;
+  }
+
+  int inlined_entry_num = 0;
+  for (const auto& pair : bucket_stats) {
+    const RGWStorageStats& s = pair.second;
+    inlined_entry_num += s.inlined_entry_num;
+  }
+
+  if(inlined_entry_num == 0){
+    ldpp_dout(dpp, 10) << __func__  <<"disable object inline for bucket: " << bucket_name << dendl;
+    RGWBucketInfo &bucket_info = bucket->get_info();
+    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_DISABLING) ;
+    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_DISABLED;
+    // update bucket info
+    ret = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &bucket->get_attrs(), dpp);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << __func__  <<"update bucket info failed,  bucket=" << bucket_name << dendl;
+      return;
+    }
+
+    // remove object inlined bucket entry
+    ret = rm_entry(bucket->get_key());
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << __func__  <<"rm_entry for bucket=" << bucket_name << " failed !" << dendl;
+      return;
+    }
+
+  }
 }
 
 /*

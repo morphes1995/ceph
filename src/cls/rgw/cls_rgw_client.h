@@ -638,6 +638,10 @@ int cls_rgw_lc_list(librados::IoCtx& io_ctx, const std::string& oid,
                     vector<cls_rgw_lc_entry>& entries);
 #endif
 
+int cls_rgw_inline_set_entry(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id, bool disabling);
+int cls_rgw_inline_rm_entry(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id);
+int cls_rgw_inlined_bucket_list(librados::IoCtx& io_ctx, const string& oid, vector<string>& buckets, bool only_disabling);
+
 /* resharding */
 void cls_rgw_reshard_add(librados::ObjectWriteOperation& op, const cls_rgw_reshard_entry& entry);
 void cls_rgw_reshard_remove(librados::ObjectWriteOperation& op, const cls_rgw_reshard_entry& entry);

@@ -1182,16 +1182,42 @@ int RGWBucket::set_obj_inline(RGWBucketAdminOpState &op_state, const DoutPrefixP
     return r;
   }
 
+  if (bucket_info.versioned()){
+    set_err_msg(err_msg, "could not set object inline, because of bucket was versioned!");
+    return -EINVAL;
+  }
+
   if (op_state.obj_inline_enabled) {
     if (bucket_info.versioned()){
       set_err_msg(err_msg, "could not enable tiny object inline feature, because of bucket was versioned!");
       return -EINVAL;
     }
+
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_ENABLED){
+      set_err_msg(err_msg, "object inline already enabled!");
+      return -EINVAL;
+    }
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_DISABLING){
+      set_err_msg(err_msg, "object inline is disabling, please wait");
+      return -EINVAL;
+    }
+
     bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_DISABLED) ;
     bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_ENABLED;
+    store->getRados()->get_dc()->set_entry(bucket, false);
   } else {
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_DISABLED){
+      set_err_msg(err_msg, "object inline already disabled!");
+      return -EINVAL;
+    }
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_DISABLING){
+      set_err_msg(err_msg, "object inline is disabling, please wait");
+      return -EINVAL;
+    }
+
     bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_ENABLED) ;
-    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_DISABLED;
+    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_DISABLING;
+    store->getRados()->get_dc()->set_entry(bucket, true);
   }
 
   // update bucket info
@@ -1579,7 +1605,15 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   formatter->dump_bool("trash enabled", bucket_info.trash_bin_enabled());
   formatter->dump_int("trash obj expired days", bucket_info.trash_obj_expired_days);
 
-  formatter->dump_bool("tiny_object_inline_enabled", bucket_info.tiny_obj_inline_enabled());
+  string status;
+  if(bucket_info.tiny_obj_inline_enabled()){
+    status = "enabled";
+  }else if(bucket_info.tiny_obj_inline_disabled()){
+    status = "disabled";
+  }else if(bucket_info.tiny_obj_inline_disabling()){
+    status = "disabling";
+  }
+  formatter->dump_string("tiny_object_inline_status", status);
   formatter->dump_int("tiny_object_size_threshold_kb", bucket_info.tiny_object_size_kb_threshold);
   formatter->dump_int("bucket_stats_refresh_interval_sec", bucket_info.bucket_stats_refresh_interval);
   formatter->dump_int("max_quota_allowed_pct", bucket_info.max_quota_pct_to_allow_inline);

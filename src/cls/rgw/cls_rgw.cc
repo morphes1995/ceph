@@ -4971,6 +4971,87 @@ static int rgw_cls_lc_get_head(cls_method_context_t hctx, bufferlist *in,  buffe
   return 0;
 }
 
+static int rgw_cls_inline_set_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  auto in_iter = in->cbegin();
+
+  cls_rgw_inline_entry_op op;
+  try {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: rgw_cls_inline_set_entry(): failed to decode entry\n");
+    return -EINVAL;
+  }
+
+  bufferlist bl;
+  encode(op, bl);
+
+  int ret = cls_cxx_map_set_val(hctx, op.bucket_id, &bl);
+  return ret;
+}
+
+static int rgw_cls_inline_rm_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  auto in_iter = in->cbegin();
+
+  cls_rgw_inline_entry_op op;
+  try {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: rgw_cls_inline_set_entry(): failed to decode entry\n");
+    return -EINVAL;
+  }
+
+  bufferlist bl;
+  encode(op, bl);
+
+  int ret = cls_cxx_map_remove_key(hctx, op.bucket_id);
+  return ret;
+}
+
+static int rgw_cls_inlined_buckets_list(cls_method_context_t hctx, bufferlist *in,
+                                   bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  cls_rgw_inlined_buckets_list_op op;
+  auto in_iter = in->cbegin();
+  try {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: rgw_cls_inline_set_entry(): failed to decode entry\n");
+    return -EINVAL;
+  }
+
+  cls_rgw_inlined_buckets_list_ret ret;
+  map<string, bufferlist> vals;
+  bool more;
+  int r = cls_cxx_map_get_vals(hctx, "", "", LONG_MAX, &vals, &more);
+  if (r < 0)
+    return r;
+
+  for (auto it = vals.begin(); it != vals.end(); ++it) {
+    cls_rgw_inline_entry_op entry;
+    auto iter = it->second.cbegin();
+    try {
+      decode(entry, iter);
+    } catch (buffer::error& err) {
+      return -EIO;
+    }
+
+    if (op.only_disabling){
+      if(entry.disabling){
+        ret.buckets.push_back(entry.bucket_id);
+      }
+    }else{
+      ret.buckets.push_back(entry.bucket_id);
+    }
+  }
+  encode(ret, *out);
+  return 0;
+}
+
 static int rgw_reshard_add(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   CLS_LOG(10, "entered %s()\n", __func__);
@@ -5251,6 +5332,9 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_lc_put_head;
   cls_method_handle_t h_rgw_lc_get_head;
   cls_method_handle_t h_rgw_lc_list_entries;
+  cls_method_handle_t h_rgw_inline_set_entry;
+  cls_method_handle_t h_rgw_inline_rm_entry;
+  cls_method_handle_t h_rgw_cls_inlined_buckets_list;
   cls_method_handle_t h_rgw_reshard_add;
   cls_method_handle_t h_rgw_reshard_list;
   cls_method_handle_t h_rgw_reshard_get;
@@ -5320,6 +5404,11 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_LC_PUT_HEAD, CLS_METHOD_RD| CLS_METHOD_WR, rgw_cls_lc_put_head, &h_rgw_lc_put_head);
   cls_register_cxx_method(h_class, RGW_LC_GET_HEAD, CLS_METHOD_RD, rgw_cls_lc_get_head, &h_rgw_lc_get_head);
   cls_register_cxx_method(h_class, RGW_LC_LIST_ENTRIES, CLS_METHOD_RD, rgw_cls_lc_list_entries, &h_rgw_lc_list_entries);
+
+  /* inlined bucket list */
+  cls_register_cxx_method(h_class, RGW_INLINE_SET_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_inline_set_entry, &h_rgw_inline_set_entry);
+  cls_register_cxx_method(h_class, RGW_INLINE_SET_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_inline_rm_entry, &h_rgw_inline_rm_entry);
+  cls_register_cxx_method(h_class, RGW_INLINED_BUCKETS_LIST, CLS_METHOD_RD, rgw_cls_inlined_buckets_list, &h_rgw_cls_inlined_buckets_list);
 
   /* resharding */
   cls_register_cxx_method(h_class, RGW_RESHARD_ADD, CLS_METHOD_RD | CLS_METHOD_WR, rgw_reshard_add, &h_rgw_reshard_add);

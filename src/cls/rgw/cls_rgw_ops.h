@@ -1397,6 +1397,61 @@ cls_rgw_lc_list_entries_ret(uint8_t compat_v = 3)
 };
 WRITE_CLASS_ENCODER(cls_rgw_lc_list_entries_ret)
 
+struct cls_rgw_inline_entry_op {
+    string bucket_id;
+    bool disabling;
+    cls_rgw_inline_entry_op() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+      encode(bucket_id, bl);
+      encode(disabling, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+      decode(bucket_id, bl);
+      decode(disabling, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(cls_rgw_inline_entry_op)
+
+struct cls_rgw_inlined_buckets_list_op {
+    bool only_disabling;
+    cls_rgw_inlined_buckets_list_op() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(only_disabling, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(only_disabling, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(cls_rgw_inlined_buckets_list_op)
+
+struct cls_rgw_inlined_buckets_list_ret {
+    vector<string> buckets;
+    cls_rgw_inlined_buckets_list_ret() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(buckets, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(buckets, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(cls_rgw_inlined_buckets_list_ret)
+
 struct cls_rgw_reshard_add_op {
  cls_rgw_reshard_entry entry;
 

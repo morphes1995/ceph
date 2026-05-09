@@ -2715,6 +2715,13 @@ void RGWSetBucketVersioning::execute(optional_yield y)
       return;
   }
 
+  if (!s->bucket->get_info().tiny_obj_inline_disabled()) {
+    s->err.message = "bucket versioning cannot be enabled on buckets with object inline feature enabled";
+    ldpp_dout(this, 4) << "ERROR: " << s->err.message << dendl;
+    op_ret = -ERR_INVALID_BUCKET_STATE;
+    return;
+  }
+
   bool cur_mfa_status = s->bucket->get_info().mfa_enabled();
 
   mfa_set_status &= (mfa_status != cur_mfa_status);

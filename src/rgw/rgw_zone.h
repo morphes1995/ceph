@@ -366,6 +366,7 @@ struct RGWZoneParams : RGWSystemMetaObj {
   rgw_pool control_pool;
   rgw_pool gc_pool;
   rgw_pool lc_pool;
+  rgw_pool inline_pool;
   rgw_pool log_pool;
   rgw_pool intent_log_pool;
   rgw_pool usage_log_pool;
@@ -414,7 +415,7 @@ struct RGWZoneParams : RGWSystemMetaObj {
   const string& get_compression_type(const rgw_placement_rule& placement_rule) const;
   
   void encode(bufferlist& bl) const override {
-    ENCODE_START(14, 1, bl);
+    ENCODE_START(15, 1, bl);
     encode(domain_root, bl);
     encode(control_pool, bl);
     encode(gc_pool, bl);
@@ -440,11 +441,12 @@ struct RGWZoneParams : RGWSystemMetaObj {
     encode(tier_config, bl);
     encode(oidc_pool, bl);
     encode(notif_pool, bl);
+    encode(inline_pool, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) override {
-    DECODE_START(14, bl);
+    DECODE_START(15, bl);
     decode(domain_root, bl);
     decode(control_pool, bl);
     decode(gc_pool, bl);
@@ -512,6 +514,11 @@ struct RGWZoneParams : RGWSystemMetaObj {
       decode(notif_pool, bl);
     } else {
       notif_pool = log_pool.name + ":notif";
+    }
+    if (struct_v >= 15) {
+      decode(inline_pool, bl);
+    } else {
+      inline_pool = log_pool.name + ":inline";
     }
     DECODE_FINISH(bl);
   }
