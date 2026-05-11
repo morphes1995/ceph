@@ -1466,7 +1466,7 @@ public:
                    list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false);
         int complete_atomic_del(const DoutPrefixProvider *dpp,
                                 real_time& removed_mtime,
-                                list<rgw_obj_index_key> *remove_objs);
+                                list<rgw_obj_index_key> *remove_objs, bool update_quota_stats);
 
       void set_head_attr(const string &name, const bufferlist& v){
         head_attrs.emplace(name, v);
@@ -1904,7 +1904,7 @@ public:
                            ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
   int cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, string& tag, rgw_obj& obj,
-                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs,
+                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, bool update_quota_stats,
                            bool check_mtime, real_time mtime, bool high_precision_time, RGWCheckMTimeType type,
                            uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_complete_cancel(BucketShard& bs, std::string& tag, rgw_obj& obj,

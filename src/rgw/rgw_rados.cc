@@ -6193,6 +6193,14 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     dirent.meta.mtime = mtime;
     dirent.ver.pool = ref.pool.ioctx().get_id();
     dirent.ver.epoch = ref.pool.ioctx().get_last_version();
+
+    if (dirent.meta.inline_head){
+      dirent.meta.inline_head = false;
+      dirent.meta.head_data.clear();
+      dirent.meta.head_data_size =0;
+      dirent.meta.head_attrs.clear();
+    }
+
     encode(dirent, entry_in_trash_bin.data);
     r = store->bi_put(dpp, target->get_bucket_info().bucket, rgw_obj_in_trash, entry_in_trash_bin);
     if (r < 0) {
@@ -6257,14 +6265,33 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
     }
   }
 
-  // todo compat with bucket trash bin
+  bool update_quota_stats = true;
+  if (params.bucket_trash_bin_enabled) {
+    /**
+     * the deleting object move to trash , only when:
+     * 1. bucket trash is enabled
+     * 2. deleting object is not in trash bin
+     * 3. user do not specify del_obj_bypass_trash_bin param
+     */
+    if (!params.obj_in_bucket_trash_bin && !params.del_obj_bypass_trash_bin){
+      update_quota_stats = false; // if obj move to trash bin, keep quota stats unchanged
+      r =  copy_head_and_bi_to_trash_bin(null_yield, dpp);// copy head and bi entry to trash bin on delete
+      if ( r < 0)
+        return r;
+    }
+  }
 
   index_op.set_zones_trace(params.zones_trace);
+
+  if(params.del_obj_bypass_trash_bin){
+    // data sync use this flag
+    params.bilog_flags |= RGW_BILOG_FLAG_FORCE_DEL_OP;
+  }
   index_op.set_bilog_flags(params.bilog_flags);
   append_rand_alpha(target->get_store()->ctx(), state->write_tag, state->write_tag, 32);
   index_op.set_op_tag(state->write_tag);
 
-  r = index_op.complete_atomic_del(dpp, state->mtime, params.remove_objs);
+  r = index_op.complete_atomic_del(dpp, state->mtime, params.remove_objs, update_quota_stats);
 
   if (r >= 0) {
     tombstone_cache_t *obj_tombstone_cache = target->get_store()->get_tombstone_cache();
@@ -6285,7 +6312,7 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
   }else{
     obj_accounted_size = state->accounted_size;
   }
-  if(obj_accounted_size > 0){
+  if(obj_accounted_size > 0 && update_quota_stats){
     /* update quota cache */
     target->get_store()->quota_handler->update_stats(params.bucket_owner, obj.bucket, -1, 0, obj_accounted_size);
   }
@@ -6384,8 +6411,8 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
           ldpp_dout(dpp, 0) << "ERROR: bad trash obj name(" << obj.key.name << ")" << dendl;
           return -EINVAL;
       }
-      string orgin_obj_name = obj.key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
-      obj.index_hash_source = orgin_obj_name; // trash obj on the shard where origin obj located
+      string origin_obj_name = obj.key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+      obj.index_hash_source = origin_obj_name; // trash obj on the shard where origin obj located
   }
 
   rgw_rados_ref ref;
@@ -6716,6 +6743,9 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
         ldpp_dout(dpp, 0) << "ERROR: obj("<< origin_obj.key.name<<") restore_index_op.prepare failed,  returned ret=" << r << dendl;
         return r;
     }
+    bufferlist bl;
+    encode(restore_index_op.get_epoch(), bl);
+    restore_op.setxattr(RGW_ATTR_INDEX_POOL_EPOCH, bl); // set index pool epoch in head attr
 
     auto& ioctx = origin_obj_ref.pool.ioctx();
     r = rgw_rados_operate(dpp, origin_obj_ref.pool.ioctx(), origin_obj_ref.obj.oid, &restore_op, null_yield);
@@ -7948,7 +7978,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_add(const DoutPrefixPro
 
 int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_del(const DoutPrefixProvider *dpp,
                                                              real_time& removed_mtime,
-                                                             list<rgw_obj_index_key> *remove_objs)
+                                                             list<rgw_obj_index_key> *remove_objs, bool update_quota_stats)
 {
   RGWRados *store = target->get_store();
   BucketShard *bs;
@@ -7960,7 +7990,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_del(const DoutPrefixPro
   }
 
   ret = guard_reshard(dpp, nullptr, [&](BucketShard *bs) -> int {
-            return store->cls_obj_complete_del_op_atomic(dpp, *bs, optag, obj, removed_mtime, remove_objs,
+            return store->cls_obj_complete_del_op_atomic(dpp, *bs, optag, obj, removed_mtime, remove_objs, update_quota_stats,
                                                          check_mtime, mtime, high_precision_time, type,
                                                          bilog_flags, zones_trace);
         });
@@ -10307,7 +10337,7 @@ int RGWRados::cls_obj_complete_del(BucketShard& bs, string& tag,
 int RGWRados::cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, string& tag,
                                    rgw_obj& obj,
                                    real_time& removed_mtime,
-                                   list<rgw_obj_index_key> *remove_objs,
+                                   list<rgw_obj_index_key> *remove_objs, bool update_quota_stats,
                                    bool check_mtime, real_time mtime, bool high_precision_time, RGWCheckMTimeType check_type,
                                    uint16_t bilog_flags, rgw_zone_set *_zones_trace)
 {
@@ -10346,7 +10376,7 @@ int RGWRados::cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, Buck
   if (remove_objs)
     call.remove_objs = *remove_objs;
   call.zones_trace = zones_trace;
-  call.update_quota_stats = true;
+  call.update_quota_stats = update_quota_stats;
 
   if (check_mtime){
     cls_rgw_obj_check_mtime_bi(o, ent.key,mtime, high_precision_time, check_type);
