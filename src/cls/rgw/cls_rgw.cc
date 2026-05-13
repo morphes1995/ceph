@@ -1652,9 +1652,11 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
         // clear inlined head data
         entry.meta.inline_head = false;
         entry.meta.head_data.clear();
-        entry.meta.head_data_size =0;
-        entry.meta.head_attrs.clear();
         entry.meta.inline_index_epoch = 0;
+
+        // tiny object payload data position
+        entry.meta.merge_obj_oid = op_entry.merge_obj_oid;
+        entry.meta.offset = op_entry.offset;
 
         bufferlist entry_bl;
         encode(entry, entry_bl);

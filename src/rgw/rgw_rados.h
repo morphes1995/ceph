@@ -585,9 +585,9 @@ public:
 private:
     dequeue_result dequeue();
     void* entry() override;
-    void batch_detach_parallel(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries);
-    int _rebuild_head_async(ShardItem &shardItem, rgw_bucket_dir_entry &dirent,
-                      list<rgw_bucket_inlined_entry> *detached_entries, uint64_t total_cnt, ceph::mutex *lock, ceph::condition_variable *cond);
+    void batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_oid);
+    int _merge_heads_payload(ShardItem &shardItem, string &merge_obj_oid,
+                                      list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_detached);
 };
 
 

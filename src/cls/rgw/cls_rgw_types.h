@@ -203,6 +203,8 @@ struct rgw_bucket_dir_entry_meta {
   uint64_t head_data_size;
   std::map<string, bufferlist> head_attrs;
   uint64_t inline_index_epoch;
+  string merge_obj_oid;
+  uint32_t offset;
 
   rgw_bucket_dir_entry_meta() :
     category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false), inline_head(false), head_data_size(0), inline_index_epoch(0) { }
@@ -226,6 +228,8 @@ struct rgw_bucket_dir_entry_meta {
     encode(head_data_size, bl);
     encode(head_attrs, bl);
     encode(inline_index_epoch, bl);
+    encode(merge_obj_oid, bl);
+    encode(offset, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -255,6 +259,8 @@ struct rgw_bucket_dir_entry_meta {
       decode(head_data_size, bl);
       decode(head_attrs, bl);
       decode(inline_index_epoch, bl);
+      decode(merge_obj_oid, bl);
+      decode(offset, bl);
     }
     DECODE_FINISH(bl);
   }
@@ -902,6 +908,7 @@ struct rgw_bucket_dir_header {
   // lease info
   std::string rgw_instance_hold_lease;
   ceph::real_time  acquire_time;
+  string current_merge_obj_oid;
 
   rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false) {}
 
@@ -916,6 +923,7 @@ struct rgw_bucket_dir_header {
     encode(syncstopped,bl);
     encode(rgw_instance_hold_lease, bl);
     encode(acquire_time, bl);
+    encode(current_merge_obj_oid, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -943,9 +951,10 @@ struct rgw_bucket_dir_header {
     if (struct_v >= 7) {
       decode(syncstopped,bl);
     }
-    if (struct_v >= 7){
+    if (struct_v >= 8){
       decode(rgw_instance_hold_lease, bl);
       decode(acquire_time, bl);
+      decode(current_merge_obj_oid, bl);
     }
     DECODE_FINISH(bl);
   }

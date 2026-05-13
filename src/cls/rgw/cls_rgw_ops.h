@@ -489,7 +489,8 @@ struct rgw_bucket_inlined_entry {
     cls_rgw_obj_key key;
     std::string tag;
     uint64_t inline_index_epoch;
-    int r;
+    string merge_obj_oid;
+    uint32_t offset;
 
     rgw_bucket_inlined_entry() : inline_index_epoch(0) {}
 
@@ -498,6 +499,8 @@ struct rgw_bucket_inlined_entry {
         encode(key, bl);
         encode(tag, bl);
         encode(inline_index_epoch, bl);
+        encode(merge_obj_oid, bl);
+        encode(offset, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
@@ -505,6 +508,8 @@ struct rgw_bucket_inlined_entry {
         decode(key, bl);
         decode(tag, bl);
         decode(inline_index_epoch, bl);
+        decode(merge_obj_oid, bl);
+        decode(offset, bl);
       DECODE_FINISH(bl);
     }
 
