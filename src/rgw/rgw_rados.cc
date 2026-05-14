@@ -240,6 +240,8 @@ RGWObjState::RGWObjState(const RGWObjState& rhs) : obj (rhs.obj) {
     head_obj_tag = rhs.head_obj_tag;
   }
   head_manifest = rhs.head_manifest;
+  merge_obj_oid = rhs.merge_obj_oid;
+  offset = rhs.offset;
 }
 
 RGWObjState *RGWObjectCtx::get_state(const rgw_obj& obj) {
@@ -3810,7 +3812,7 @@ void RGWObjStateAioManager::wait_for_completions(int *head_ret_code, int *bi_ent
 
 int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
                                        bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker,
-                                       bool* inlined, bool* head_exists, bufferlist *head_obj_tag, uint64_t *head_rados_size) {
+                                       bool* inlined, bool* head_exists, bufferlist *head_obj_tag, uint64_t *head_rados_size, string *merge_obj_oid, uint32_t *offset) {
   int r = 0;
   r = issue_get_obj_state_from_bi_entry_op(first_chunk, objv_tracker);
   if (r < 0) {
@@ -3874,7 +3876,7 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
       if (head_exists){
         *head_exists = false;
       }
-      return parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, objv_tracker);
+      return parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, merge_obj_oid, offset, objv_tracker);
     }
   }
 
@@ -3916,7 +3918,7 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
         }
 
         if (dirent.exists){
-          r = parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, objv_tracker);
+          r = parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, merge_obj_oid, offset, objv_tracker);
         }else {
           r = -ENOENT; // treat this non-existence inlined entry as deleter delete marker
         }
@@ -3960,7 +3962,7 @@ void RGWConcurrentGetObjState::parse_head_as_result(uint64_t *psize, ceph::real_
 
 int RGWConcurrentGetObjState::parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                                                         map<string, bufferlist> *attrs,
-                                                        bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker) {
+                                                        bufferlist *first_chunk, string *merge_obj_oid, uint32_t *offset, RGWObjVersionTracker *objv_tracker) {
   if (attrs) {
     rgw_filter_attrset(dirent.meta.head_attrs, RGW_ATTR_PREFIX, attrs);
   }
@@ -3972,6 +3974,13 @@ int RGWConcurrentGetObjState::parse_bi_entry_as_result(rgw_bucket_dir_entry &dir
     *psize = dirent.meta.head_data_size;
   if (pmtime)
     *pmtime = dirent.meta.mtime;
+
+  if(merge_obj_oid){
+    *merge_obj_oid = dirent.meta.merge_obj_oid;
+  }
+  if(offset){
+    *offset = dirent.meta.offset;
+  }
 
   if (objv_tracker) {
     auto head_attrs = dirent.meta.head_attrs;
@@ -6869,7 +6878,7 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
       // issue concurrent ops to search rgw object state from both head object attr and bucket index entry
       auto start_time = ceph_clock_now();
       r = concurrentGetState.issue_op(&s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL,
-                                      &s->inlined, &s->head_exists, &s->head_obj_tag, &s->head_rados_size);
+                                      &s->inlined, &s->head_exists, &s->head_obj_tag, &s->head_rados_size, &s->merge_obj_oid, &s->offset);
       auto after_time = ceph_clock_now();
       ldpp_dout(dpp, 20) << "concurrent get object[" << ref.obj.oid << "] state time taken: "<< (after_time - start_time) << dendl;
 
@@ -8060,24 +8069,42 @@ struct get_obj_data {
 };
 
 static int _get_obj_iterate_cb(const DoutPrefixProvider *dpp, 
-                               const rgw_raw_obj& read_obj, off_t obj_ofs,
+                               const rgw_raw_obj& read_obj, const rgw_raw_obj& merge_obj, off_t obj_ofs,
                                off_t read_ofs, off_t len, bool is_head_obj,
                                RGWObjState *astate, void *arg)
 {
   struct get_obj_data *d = (struct get_obj_data *)arg;
 
-  return d->store->get_obj_iterate_cb(dpp, read_obj, obj_ofs, read_ofs, len,
+  return d->store->get_obj_iterate_cb(dpp, read_obj, merge_obj, obj_ofs, read_ofs, len,
                                       is_head_obj, astate, arg);
 }
 
 int RGWRados::get_obj_iterate_cb(const DoutPrefixProvider *dpp,
-                                 const rgw_raw_obj& read_obj, off_t obj_ofs,
+                                 const rgw_raw_obj& read_obj, const rgw_raw_obj& merge_obj, off_t obj_ofs,
                                  off_t read_ofs, off_t len, bool is_head_obj,
                                  RGWObjState *astate, void *arg)
 {
   ObjectReadOperation op;
   struct get_obj_data *d = (struct get_obj_data *)arg;
   string oid, key;
+
+  if (astate && !astate->merge_obj_oid.empty()) {
+    unsigned chunk_len = std::min(astate->size - obj_ofs, (uint64_t)len);
+    auto obj = d->store->svc.rados->obj(merge_obj);
+    int r = obj.open(dpp);
+    if (r < 0) {
+      ldpp_dout(dpp, 4) << "failed to open merge rados context for " << merge_obj << dendl;
+      return r;
+    }
+
+    ldpp_dout(dpp, 20) << "rados->get_obj_iterate_cb oid=" << merge_obj.oid << " obj-ofs=" << obj_ofs << " len=" << len << dendl;
+    op.read(astate->offset + obj_ofs, len, nullptr, nullptr);
+
+    const uint64_t cost = len;
+    const uint64_t id = astate->offset + obj_ofs; // use logical object offset for sorting replies
+    auto completed = d->aio->get(obj, rgw::Aio::librados_op(std::move(op), d->yield), cost, id);
+    return d->flush(std::move(completed));
+  }
 
   if (is_head_obj) {
     /* only when reading from the head object do we need to do the atomic test */
@@ -8150,6 +8177,7 @@ int RGWRados::iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx,
 {
   rgw_raw_obj head_obj;
   rgw_raw_obj read_obj;
+  rgw_raw_obj raw_merge_obj;
   uint64_t read_ofs = ofs;
   uint64_t len;
   bool reading_from_head = true;
@@ -8160,6 +8188,11 @@ int RGWRados::iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx,
   int r = get_obj_state(dpp, &obj_ctx, bucket_info, obj, &astate, false, y);
   if (r < 0) {
     return r;
+  }
+
+  if(!astate->merge_obj_oid.empty()){
+    rgw_obj merge_obj(bucket_info.bucket, astate->merge_obj_oid);
+    obj_to_raw(bucket_info.placement_rule, merge_obj, &raw_merge_obj);
   }
 
   if (end < 0)
@@ -8187,7 +8220,7 @@ int RGWRados::iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx,
         }
 
         reading_from_head = (read_obj == head_obj);
-        r = cb(dpp, read_obj, ofs, read_ofs, read_len, reading_from_head, astate, arg);
+        r = cb(dpp, read_obj, raw_merge_obj, ofs, read_ofs, read_len, reading_from_head, astate, arg);
 	if (r < 0) {
 	  return r;
         }
@@ -8201,7 +8234,7 @@ int RGWRados::iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx,
       read_obj = head_obj;
       uint64_t read_len = std::min(len, max_chunk_size);
 
-      r = cb(dpp, read_obj, ofs, ofs, read_len, reading_from_head, astate, arg);
+      r = cb(dpp, read_obj, raw_merge_obj, ofs, ofs, read_len, reading_from_head, astate, arg);
       if (r < 0) {
 	return r;
       }

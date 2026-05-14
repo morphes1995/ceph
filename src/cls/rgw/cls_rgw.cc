@@ -1444,7 +1444,7 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
   }
 
   auto interval = std::chrono::duration<int, std::ratio<1, 1000>>(op.lease_hold_interval_ms);
-  utime_t    give_up (new_dir.header.acquire_time+interval);
+  utime_t  give_up (new_dir.header.acquire_time+interval);
   utime_t  now(ceph::real_clock::now());
   CLS_LOG(20, "%s: , holder: %s give up time: %ld, now: %ld interval_ms: %d", __func__, new_dir.header.rgw_instance_hold_lease.c_str(),
           give_up.to_msec(), now.to_msec() ,op.lease_hold_interval_ms);
@@ -1650,7 +1650,6 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
       if (entry.exists){
         // inlined entry is still what we detached
         // clear inlined head data
-        entry.meta.inline_head = false;
         entry.meta.head_data.clear();
         entry.meta.inline_index_epoch = 0;
 

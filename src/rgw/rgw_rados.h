@@ -188,6 +188,9 @@ struct RGWObjState {
   std::optional<RGWObjManifest> head_manifest;
   uint64_t head_rados_size{0}; // if the head object exists, size head object
 
+  string merge_obj_oid;
+  uint32_t offset;
+
   /* important! don't forget to update copy constructor */
 
   RGWObjVersionTracker objv_tracker;
@@ -524,7 +527,7 @@ class RGWConcurrentGetObjState {
                              bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
     int parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                                                             map<string, bufferlist> *attrs,
-                                                            bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
+                                                            bufferlist *first_chunk, string *merge_obj_oid, uint32_t *offset, RGWObjVersionTracker *objv_tracker);
 
 public:
     RGWConcurrentGetObjState(const DoutPrefixProvider *_dpp, CephContext *_cct,
@@ -536,7 +539,7 @@ public:
 
     int issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
                  bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker,
-                 bool* inlined = NULL, bool* head_exists = NULL, bufferlist *head_obj_tag = NULL, uint64_t *head_rados_size = NULL);
+                 bool* inlined = NULL, bool* head_exists = NULL, bufferlist *head_obj_tag = NULL, uint64_t *head_rados_size = NULL, string *merge_obj_oid=NULL, uint32_t *offset=NULL);
 };
 
 struct ShardItem{
@@ -1762,7 +1765,7 @@ public:
     return get_obj_state(dpp, rctx, bucket_info, obj, state, true, y);
   }
 
-  using iterate_obj_cb = int (*)(const DoutPrefixProvider*, const rgw_raw_obj&, off_t, off_t,
+  using iterate_obj_cb = int (*)(const DoutPrefixProvider*, const rgw_raw_obj&, const rgw_raw_obj&, off_t, off_t,
                                  off_t, bool, RGWObjState*, void*);
 
   int iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& ctx, const RGWBucketInfo& bucket_info,
@@ -1771,7 +1774,7 @@ public:
                   optional_yield y);
 
   int get_obj_iterate_cb(const DoutPrefixProvider *dpp,
-                         const rgw_raw_obj& read_obj, off_t obj_ofs,
+                         const rgw_raw_obj& read_obj, const rgw_raw_obj& merge_obj, off_t obj_ofs,
                          off_t read_ofs, off_t len, bool is_head_obj,
                          RGWObjState *astate, void *arg);
 
