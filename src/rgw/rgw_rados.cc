@@ -4106,6 +4106,7 @@ void *DCWorkQ::entry() {
     bool truncated = true;
     cls_rgw_obj_key start_obj;
     while (truncated) {
+      auto before_list = ceph_clock_now();
       rgw_cls_list_ret result;
       librados::ObjectReadOperation op;
       cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
@@ -4133,6 +4134,8 @@ void *DCWorkQ::entry() {
                           << " shard:" << shardItem.oid << " r: " << r << dendl;
         break; // handle next shard
       }
+      auto after_list = ceph_clock_now();
+      ldpp_dout(dpp, 20) << "cls_rgw_bucket_inlined_entry_list_op items:" << result.dir.m.size() << " time taken: "<< (after_list - before_list) << dendl;
 
       truncated = result.is_truncated;
       start_obj = result.marker;
@@ -4171,9 +4174,8 @@ struct detach_head_op_data {
         goto done;
       }
 
-      // detach succeed
+      // 3. detach succeed
       // gc tails
-
       store->getRados()->update_gc_chain(dpp, obj, manifest , &chain);
       if (chain.empty()) {
         goto done;
@@ -4212,6 +4214,153 @@ static void detach_head_cb(completion_t cb, void *arg)
   delete completion;
 }
 
+struct read_head_op_data {
+    rgw::sal::RGWRadosStore* store;
+    const DoutPrefixProvider *dpp;
+    map<string, bufferlist> attrs;
+    uint64_t head_size;
+
+    rgw_bucket_dir_entry dirent;
+    rgw_rados_ref ref;
+    rgw_placement_rule placement_rule;
+    rgw_obj obj;
+    uint64_t inline_index_epoch;
+    ceph::mutex *lock;
+    ceph::condition_variable *cond;
+    list<rgw_bucket_inlined_entry> *detached_entries;
+    uint64_t total_entries_cnt;
+
+    void handle_completion(completion_t cb) {
+      int r = rados_aio_get_return_value(cb);
+
+      bool exists = true;
+      RGWObjManifest manifest;
+      ObjectWriteOperation op;
+      detach_head_op_data *entry = new detach_head_op_data();
+      AioCompletion *c = librados::Rados::aio_create_completion(entry, detach_head_cb);
+      if (r == -ENOENT){
+        exists = false;
+      }else{
+        bufferlist manifest_bl = attrs[RGW_ATTR_MANIFEST];
+        if (manifest_bl.length()) {
+          auto miter = manifest_bl.cbegin();
+          try {
+            decode(manifest, miter);
+            manifest.set_head(placement_rule, obj, head_size);
+          } catch (buffer::error& err) {
+            ldpp_dout(dpp, 0) << "couldn't decode head manifest" << dendl;
+            goto done;
+          }
+        }
+      }
+
+      // 2. encapsulate write op
+      entry->manifest = manifest;
+      entry->store = store;
+      entry->dpp = dpp;
+      entry->tag = dirent.tag;
+      entry->obj = obj;
+
+      entry->lock = lock;
+      entry->cond = cond;
+      entry->total_entries_cnt = total_entries_cnt;
+      entry->inline_index_epoch = dirent.meta.inline_index_epoch;
+      entry->detached_entries = detached_entries;
+
+      if (dirent.exists){
+        // case 1: write head
+        // gard
+        if (exists) {
+          op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
+          // only overwrite head with index epoch less than us
+          op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
+          op.create(false);
+          list<string> prefixes;
+          cls_rgw_remove_obj(op, prefixes);
+        } else {
+          op.create(true);
+        }
+
+        // mtime
+        struct timespec mtime_ts = real_clock::to_timespec(dirent.meta.mtime);
+        op.mtime2(&mtime_ts);
+        // attrs
+        for (const auto &item: dirent.meta.head_attrs){
+          op.setxattr(item.first.c_str(), item.second);
+        }
+        bufferlist bl;
+        encode(dirent.meta.inline_index_epoch, bl);
+        op.setxattr(RGW_ATTR_INDEX_POOL_EPOCH, bl);
+        // data
+        op.write_full(dirent.meta.head_data);
+
+        auto& ioctx = ref.pool.ioctx();
+        r = ioctx.aio_operate(ref.obj.oid, c, &op);
+        if (r < 0) {
+          ldpp_dout(dpp, 1) << "WARNING failed to write back the head, obj :" << dirent.key.name << " r: " << r << dendl;
+          goto done;
+        }
+      } else {
+        // case 2: delete head
+        if (!exists) {
+          goto done;
+        }
+
+        op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
+        // only overwrite head with index epoch less than us
+        op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
+        list<string> prefixes;
+        cls_rgw_remove_obj(op, prefixes);
+
+        auto& ioctx = ref.pool.ioctx();
+        r = ioctx.aio_operate(ref.obj.oid, c, &op);
+        if (r < 0) {
+          ldpp_dout(dpp, 1) << "ERROR failed to delete back the head, obj :" << dirent.key.name << " r: " << r << dendl;
+          goto done;
+        }
+      }
+
+      return;
+
+    done:
+      rgw_bucket_inlined_entry d;
+      d.key = cls_rgw_obj_key(obj.key.name);
+      d.tag = dirent.tag;
+      d.inline_index_epoch = inline_index_epoch;
+      d.r = r;
+
+      std::lock_guard l{*lock};
+      detached_entries->push_back(d);
+      if(detached_entries->size() == total_entries_cnt){
+        cond->notify_one();
+      }
+    }
+};
+
+static void read_head_cb(completion_t cb, void *arg)
+{
+  read_head_op_data *completion = (read_head_op_data *)arg;
+  completion->handle_completion(cb);
+  delete completion;
+}
+
+struct clear_op_data {
+    const DoutPrefixProvider *dpp;
+    void handle_completion(completion_t cb) {
+      int r = rados_aio_get_return_value(cb);
+      if (r<0){
+        ldpp_dout(dpp, 1) << "ERROR failed to clear inlined head data,  r: " << r << dendl;
+      }
+    }
+};
+
+static void clear_head_cb(completion_t cb, void *arg)
+{
+  clear_op_data *completion = (clear_op_data *)arg;
+  completion->handle_completion(cb);
+  delete completion;
+}
+
 void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries){
   list<rgw_bucket_dir_entry> entries_to_detach;
   list<rgw_bucket_inlined_entry> detached_entries;
@@ -4231,7 +4380,7 @@ void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat
   if(entries_to_detach.empty()){
     return;
   }
-
+  auto before_rebuild = ceph_clock_now();
   ceph::mutex lock = ceph::make_mutex("ParallelDetachHead::lock");
   ceph::condition_variable cond;
   uint64_t total_cnt = entries.size();
@@ -4244,6 +4393,8 @@ void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat
   while(detached_entries.size() < total_cnt){
     cond.wait(l);
   }
+  auto after_rebuild = ceph_clock_now();
+  ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_detach.size()  << ", time taken: "<< (after_rebuild - before_rebuild) << dendl;
 
   list<rgw_bucket_inlined_entry> final_detached_entries;
   for (auto &entry: detached_entries) {
@@ -4253,16 +4404,22 @@ void DCWorkQ::batch_detach_parallel(ShardItem &shardItem, boost::container::flat
     }
     final_detached_entries.push_back(entry);
   }
-
+  auto before_clear = ceph_clock_now();
   librados::ObjectWriteOperation op;
   string oid = shardItem.oid;
   librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
   cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
   cls_rgw_bucket_clear_inlined_entry_data_op(op, final_detached_entries);
-  int r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
-  if (r < 0)
+  clear_op_data *entry = new clear_op_data();
+  entry->dpp = dpp;
+  AioCompletion *c = librados::Rados::aio_create_completion(entry, clear_head_cb);
+  int r = ioctx.aio_operate(oid, c, &op);
+  if (r < 0) {
     ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] clear entries inlined data : " << shardItem.bucket.name
                       << " shard:" << shardItem.oid << " r: " << r << dendl;
+  }
+  auto after_clear = ceph_clock_now();
+  ldpp_dout(dpp, 20) << "cls_rgw_bucket_clear_inlined_entry_data_op items" << final_detached_entries.size() << " time taken: "<< (after_clear - before_clear) << dendl;
 }
 
 int DCWorkQ::_rebuild_head_async(ShardItem &shardItem, rgw_bucket_dir_entry &dirent,
@@ -4279,100 +4436,29 @@ int DCWorkQ::_rebuild_head_async(ShardItem &shardItem, rgw_bucket_dir_entry &dir
   ref.obj.pool = ref.pool.get_pool();
 
   // 1. read existed head state
-  bool exists = true;
-  RGWObjManifest manifest;
-  map<string, bufferlist> attrs;
-  uint64_t head_size;
-  r = store->getRados()->raw_obj_stat(dpp, ref.obj, &head_size, NULL, NULL, &attrs, NULL, NULL, null_yield);
-  if(r < 0 && r != -ENOENT){
-    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get obj state :" << dirent.key.name << " r: " << r << dendl;
-    return r;
-  }
-  if (r == -ENOENT){
-    exists = false;
-  }else{
-    bufferlist manifest_bl = attrs[RGW_ATTR_MANIFEST];
-    if (manifest_bl.length()) {
-      auto miter = manifest_bl.cbegin();
-      try {
-        decode(manifest, miter);
-        manifest.set_head(shardItem.placement_rule, obj, head_size);
-      } catch (buffer::error& err) {
-        ldpp_dout(dpp, 0) << "ERROR DC WorkerQ[" << thr_name() << "] couldn't decode head manifest" << dendl;
-        return -EIO;
-      }
-    }
-  }
-
-  // 2. encapsulate write op
-  ObjectWriteOperation op;
-  detach_head_op_data *entry = new detach_head_op_data();
-  entry->manifest = manifest;
+  read_head_op_data *entry = new read_head_op_data();
   entry->store = store;
   entry->dpp = dpp;
-  entry->tag = dirent.tag;
+  entry->dirent = dirent;
   entry->obj = obj;
-
+  entry->ref = ref;
+  entry->placement_rule = shardItem.placement_rule;
   entry->lock = lock;
   entry->cond = cond;
   entry->total_entries_cnt = total_cnt;
   entry->inline_index_epoch = dirent.meta.inline_index_epoch;
   entry->detached_entries = detached_entries;
 
-  AioCompletion *c = librados::Rados::aio_create_completion(entry, detach_head_cb);
-
-  if (dirent.exists){
-    // case 1: write head
-    // gard
-    if (exists) {
-      op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
-      // only overwrite head with index epoch less than us
-      op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
-      op.create(false);
-      list<string> prefixes;
-      cls_rgw_remove_obj(op, prefixes);
-    } else {
-      op.create(true);
-    }
-
-    // mtime
-    struct timespec mtime_ts = real_clock::to_timespec(dirent.meta.mtime);
-    op.mtime2(&mtime_ts);
-    // attrs
-    for (const auto &item: dirent.meta.head_attrs){
-      op.setxattr(item.first.c_str(), item.second);
-    }
-    bufferlist bl;
-    encode(dirent.meta.inline_index_epoch, bl);
-    op.setxattr(RGW_ATTR_INDEX_POOL_EPOCH, bl);
-    // data
-    op.write_full(dirent.meta.head_data);
-
-
-    auto& ioctx = ref.pool.ioctx();
-    r = ioctx.aio_operate(ref.obj.oid, c, &op);
-    if (r < 0) {
-      ldpp_dout(dpp, 1) << "WARNING DC WorkerQ[" << thr_name() << "] failed to write back the head, obj :" << dirent.key.name << " r: " << r << dendl;
-      return r;
-    }
-  } else {
-    // case 2: delete head
-    if (!exists) {
-      return 0;
-    }
-
-    op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
-    // only overwrite head with index epoch less than us
-    op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
-    list<string> prefixes;
-    cls_rgw_remove_obj(op, prefixes);
-
-    auto& ioctx = ref.pool.ioctx();
-    r = ioctx.aio_operate(ref.obj.oid, c, &op);
-    if (r < 0) {
-      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to delete back the head, obj :" << dirent.key.name << " r: " << r << dendl;
-      return r;
-    }
+  ObjectReadOperation op;
+  op.getxattrs(&entry->attrs, NULL);
+  op.stat2(&entry->head_size, NULL, NULL);
+  AioCompletion *c = librados::Rados::aio_create_completion(entry, read_head_cb);
+  auto& ioctx = ref.pool.ioctx();
+  r = ioctx.aio_operate(ref.obj.oid, c, &op, NULL);
+  if (r < 0) {
+    ldpp_dout(dpp, 1) << "WARNING DC WorkerQ[" << thr_name() << "] failed to read head state, obj :" << dirent.key.name
+                      << " r: " << r << dendl;
+    return r;
   }
 
   return 0;
