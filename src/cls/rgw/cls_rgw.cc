@@ -1187,8 +1187,10 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     // unaccount overwritten entry
     if (op.update_quota_stats){
         unaccount_entry(header, entry);
-      if(entry_already_inline){
+      if(entry_already_inline && entry.meta.merge_obj_name.empty()){
         rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+        ceph_assert(stats.inlined_total_entry_size > 0);
+        ceph_assert(stats.inlined_entry_num > 0);
         stats.inlined_entry_num --;
         stats.inlined_total_entry_size -= entry.meta.size;
       }
@@ -1299,7 +1301,9 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
         stats.actual_size -= entry.meta.size;
 
         // update inlined entry stats
-        if(entry.meta.inline_head){
+        if(entry.meta.inline_head && entry.meta.merge_obj_name.empty()){
+          ceph_assert(stats.inlined_total_entry_size > 0);
+          ceph_assert(stats.inlined_entry_num > 0);
           stats.inlined_entry_num --;
           stats.inlined_total_entry_size -= entry.meta.size;
         }
@@ -1360,6 +1364,7 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     if (op.update_quota_stats){
       unaccount_entry(header, entry);
       // update inlined entry stats
+      ceph_assert(header.stats[entry.meta.category].inlined_total_entry_size > 0);
       header.stats[entry.meta.category].inlined_total_entry_size -= entry.meta.size;
     }
 
@@ -1645,16 +1650,24 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
     if(entry.meta.inline_index_epoch == op_entry.inline_index_epoch
        && entry.tag == op_entry.tag)
     {
+
+      if(!entry.meta.merge_obj_name.empty()){
+        CLS_LOG(10, "WARNING: %s: inlined index key %s head data already merged to %s:%d, data in %s:%d is redundant",
+                __func__, inlined_index_key.c_str(),
+                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op_entry.merge_obj_name.c_str(), op_entry.offset);
+        continue;
+      }
+
       string entry_key;
       encode_obj_index_key(op_entry.key, &entry_key);
       if (entry.exists){
         // inlined entry is still what we detached
         // clear inlined head data
         entry.meta.head_data.clear();
-        entry.meta.inline_index_epoch = 0;
+        entry.meta.head_data_size = 0;
 
         // tiny object payload data position
-        entry.meta.merge_obj_oid = op_entry.merge_obj_oid;
+        entry.meta.merge_obj_name = op_entry.merge_obj_name;
         entry.meta.offset = op_entry.offset;
 
         bufferlist entry_bl;
@@ -1665,15 +1678,17 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
           return rc;
         }
       }else{
-        rc = cls_cxx_map_remove_key(hctx, entry_key);
+        rc = cls_cxx_map_remove_key(hctx, entry_key); // todo inlined deletion marker should remove
         if (rc < 0) {
           CLS_LOG(0, "ERROR: %s: cls_cxx_map_set_val() returned r=%d", __func__, rc);
           return rc;
         }
       }
 
+      ceph_assert(stats.inlined_entry_num > 0);
       stats.inlined_entry_num -= 1;
       if (entry.exists){
+        ceph_assert(stats.inlined_total_entry_size > 0);
         stats.inlined_total_entry_size -= entry.meta.size;
       }
 
@@ -1686,6 +1701,11 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
       CLS_LOG(20, "WARNING: %s: inlined index key %s was overwritten", __func__, inlined_index_key.c_str());
     }
   }
+
+  if(op.merged_obj_size >= (op.rgw_merge_object_max_size_mb<<10<<10)){
+    header.current_merge_obj_id ++; // switch to next merge big object
+  }
+
   return write_bucket_header(hctx, &header);
 }
 

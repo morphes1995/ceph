@@ -340,13 +340,15 @@ void rgw_bucket_inlined_entry::dump(Formatter *f) const {
   encode_json("key", key, f);
   encode_json("tag", tag, f);
   encode_json("inline_index_epoch", inline_index_epoch, f);
-  encode_json("merge_obj_oid", merge_obj_oid, f);
+  encode_json("merge_obj_name", merge_obj_name, f);
   encode_json("offset", offset, f);
 }
 
 void rgw_cls_clear_inlined_data_op::dump(Formatter *f) const
 {
   encode_json("entries", entries, f);
+  encode_json("merged_obj_size", merged_obj_size, f);
+  encode_json("rgw_merge_object_max_size_mb", rgw_merge_object_max_size_mb, f);
 }
 
 void rgw_cls_check_index_ret::generate_test_instances(list<rgw_cls_check_index_ret*>& o)

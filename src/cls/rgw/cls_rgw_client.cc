@@ -358,10 +358,13 @@ void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,strin
   op.exec(RGW_CLASS, RGW_BUCKET_SHARD_ACQUIRE_LEASE, in);
 }
 
-void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries)
+void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries,
+                                                uint32_t merged_obj_size, uint32_t rgw_merge_object_max_size_mb)
 {
   rgw_cls_clear_inlined_data_op call;
   call.entries = entries;
+  call.merged_obj_size = merged_obj_size;
+  call.rgw_merge_object_max_size_mb = rgw_merge_object_max_size_mb;
   bufferlist in;
   encode(call, in);
   op.exec(RGW_CLASS, RGW_BUCKET_CLEAR_INLINED_DATA, in);

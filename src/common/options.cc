@@ -6082,13 +6082,23 @@ std::vector<Option> get_rgw_options() {
             .set_long_description("Number of workpool threads per DCWorker"),
 
     Option("rgw_detach_list_batch_num", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(32)
+            .set_default(512)
             .set_description("Number of inlined object number for a list op")
             .set_long_description("Number of inlined object number for a list op"),
     Option("rgw_detach_lease_hold_interval_ms", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(500)
+            .set_default(3000)
             .set_description("detach worker shard lease hold interval")
             .set_long_description("etach worker shard lease hold interval"),
+    Option("rgw_merge_object_max_size_mb", Option::TYPE_INT, Option::LEVEL_ADVANCED)
+            .set_default(64)
+            .set_description("when tiny rgw object payload data merged to big rados object, the max size of big rados object")
+            .set_long_description("when tiny rgw object payload data merged to big rados object, the max size of big rados object, must smaller than osd_max_object_size")
+            .add_see_also("osd_max_object_size"),
+
+   Option("rgw_async_clear_inlined_entry_head_data", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+           .set_default(true)
+           .set_description("when tiny object merged to big rados object, clear inlined entry head data asynchronously")
+           .set_long_description("when tiny object merged to big rados object, clear inlined entry head data asynchronously"),
 
     Option("rgw_mp_lock_max_time", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(600)

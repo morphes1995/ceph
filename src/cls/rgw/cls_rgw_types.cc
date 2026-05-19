@@ -143,7 +143,7 @@ void rgw_bucket_dir_entry_meta::dump(Formatter *f) const
   encode_json("head_data_size", head_data_size, f);
   encode_json("head_attrs", head_attrs, f);
   encode_json("inline_index_epoch", inline_index_epoch, f);
-  encode_json("merge_obj_oid", merge_obj_oid, f);
+  encode_json("merge_obj_name", merge_obj_name, f);
   encode_json("offset", offset, f);
 }
 
@@ -167,7 +167,7 @@ void rgw_bucket_dir_entry_meta::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("inline_head", inline_head, obj);
   JSONDecoder::decode_json("head_data_size", head_data_size, obj);
   JSONDecoder::decode_json("head_attrs", head_attrs, obj);
-  JSONDecoder::decode_json("merge_obj_oid", merge_obj_oid, obj);
+  JSONDecoder::decode_json("merge_obj_name", merge_obj_name, obj);
   JSONDecoder::decode_json("offset", offset, obj);
 }
 
@@ -688,7 +688,7 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
   f->dump_string("rgw_instance_hold_lease", rgw_instance_hold_lease);
   utime_t ut(acquire_time);
   encode_json("acquire_time", ut, f);
-  f->dump_string("current_merge_obj_oid", current_merge_obj_oid);
+  f->dump_int("current_merge_obj_id", current_merge_obj_id);
 }
 
 void rgw_bucket_dir::generate_test_instances(list<rgw_bucket_dir*>& o)

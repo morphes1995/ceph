@@ -188,7 +188,7 @@ struct RGWObjState {
   std::optional<RGWObjManifest> head_manifest;
   uint64_t head_rados_size{0}; // if the head object exists, size head object
 
-  string merge_obj_oid;
+  string merge_obj_name;
   uint32_t offset;
 
   /* important! don't forget to update copy constructor */
@@ -527,7 +527,7 @@ class RGWConcurrentGetObjState {
                              bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker);
     int parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                                                             map<string, bufferlist> *attrs,
-                                                            bufferlist *first_chunk, string *merge_obj_oid, uint32_t *offset, RGWObjVersionTracker *objv_tracker);
+                                                            bufferlist *first_chunk, string *merge_obj_name, uint32_t *offset, RGWObjVersionTracker *objv_tracker);
 
 public:
     RGWConcurrentGetObjState(const DoutPrefixProvider *_dpp, CephContext *_cct,
@@ -539,7 +539,7 @@ public:
 
     int issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
                  bufferlist *first_chunk,RGWObjVersionTracker *objv_tracker,
-                 bool* inlined = NULL, bool* head_exists = NULL, bufferlist *head_obj_tag = NULL, uint64_t *head_rados_size = NULL, string *merge_obj_oid=NULL, uint32_t *offset=NULL);
+                 bool* inlined = NULL, bool* head_exists = NULL, bufferlist *head_obj_tag = NULL, uint64_t *head_rados_size = NULL, string *merge_obj_name=NULL, uint32_t *offset=NULL);
 };
 
 struct ShardItem{
@@ -588,9 +588,9 @@ public:
 private:
     dequeue_result dequeue();
     void* entry() override;
-    void batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_oid);
-    int _merge_heads_payload(ShardItem &shardItem, string &merge_obj_oid,
-                                      list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_detached);
+    void batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_name);
+    int _merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
+                                      list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_detached, uint32_t *merged_obj_size);
 };
 
 

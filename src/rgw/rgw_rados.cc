@@ -240,7 +240,7 @@ RGWObjState::RGWObjState(const RGWObjState& rhs) : obj (rhs.obj) {
     head_obj_tag = rhs.head_obj_tag;
   }
   head_manifest = rhs.head_manifest;
-  merge_obj_oid = rhs.merge_obj_oid;
+  merge_obj_name = rhs.merge_obj_name;
   offset = rhs.offset;
 }
 
@@ -3812,7 +3812,7 @@ void RGWObjStateAioManager::wait_for_completions(int *head_ret_code, int *bi_ent
 
 int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch, map<string, bufferlist> *attrs,
                                        bufferlist *first_chunk, RGWObjVersionTracker *objv_tracker,
-                                       bool* inlined, bool* head_exists, bufferlist *head_obj_tag, uint64_t *head_rados_size, string *merge_obj_oid, uint32_t *offset) {
+                                       bool* inlined, bool* head_exists, bufferlist *head_obj_tag, uint64_t *head_rados_size, string *merge_obj_name, uint32_t *offset) {
   int r = 0;
   r = issue_get_obj_state_from_bi_entry_op(first_chunk, objv_tracker);
   if (r < 0) {
@@ -3876,7 +3876,7 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
       if (head_exists){
         *head_exists = false;
       }
-      return parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, merge_obj_oid, offset, objv_tracker);
+      return parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, merge_obj_name, offset, objv_tracker);
     }
   }
 
@@ -3918,7 +3918,7 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
         }
 
         if (dirent.exists){
-          r = parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, merge_obj_oid, offset, objv_tracker);
+          r = parse_bi_entry_as_result(dirent, psize, pmtime, epoch, attrs, first_chunk, merge_obj_name, offset, objv_tracker);
         }else {
           r = -ENOENT; // treat this non-existence inlined entry as deleter delete marker
         }
@@ -3962,7 +3962,7 @@ void RGWConcurrentGetObjState::parse_head_as_result(uint64_t *psize, ceph::real_
 
 int RGWConcurrentGetObjState::parse_bi_entry_as_result(rgw_bucket_dir_entry &dirent, uint64_t *psize, ceph::real_time *pmtime, uint64_t *epoch,
                                                         map<string, bufferlist> *attrs,
-                                                        bufferlist *first_chunk, string *merge_obj_oid, uint32_t *offset, RGWObjVersionTracker *objv_tracker) {
+                                                        bufferlist *first_chunk, string *merge_obj_name, uint32_t *offset, RGWObjVersionTracker *objv_tracker) {
   if (attrs) {
     rgw_filter_attrset(dirent.meta.head_attrs, RGW_ATTR_PREFIX, attrs);
   }
@@ -3971,12 +3971,12 @@ int RGWConcurrentGetObjState::parse_bi_entry_as_result(rgw_bucket_dir_entry &dir
   }
 
   if (psize)
-    *psize = dirent.meta.head_data_size;
+    *psize = dirent.meta.size;
   if (pmtime)
     *pmtime = dirent.meta.mtime;
 
-  if(merge_obj_oid){
-    *merge_obj_oid = dirent.meta.merge_obj_oid;
+  if(merge_obj_name){
+    *merge_obj_name = dirent.meta.merge_obj_name;
   }
   if(offset){
     *offset = dirent.meta.offset;
@@ -4151,15 +4151,32 @@ void *DCWorkQ::entry() {
       start_obj = result.marker;
       ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance
                         << " read [" << result.dir.m.size() <<"] entries from shard " << shardItem.oid  <<dendl;
-      string merge_obj_oid = shardItem.bucket.bucket_id + "_" + to_string(shardItem.shard_id) + "_" + to_string(1001);
-      batch_detach_and_merge(shardItem, result.dir.m, merge_obj_oid);
+      string merge_obj_name = "evoc_merged_big_obj_" + to_string(shardItem.shard_id) + "_" + to_string(result.dir.header.current_merge_obj_id);
+      batch_detach_and_merge(shardItem, result.dir.m, merge_obj_name);
     } // listed all shard inlined objects
 
   }// going done while
   return nullptr;
 }
 
-void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_oid){
+struct clear_op_data {
+    const DoutPrefixProvider *dpp;
+    void handle_completion(completion_t cb) {
+      int r = rados_aio_get_return_value(cb);
+      if (r<0){
+        ldpp_dout(dpp, 1) << "ERROR failed to clear inlined head data,  r: " << r << dendl;
+      }
+    }
+};
+
+static void clear_head_cb(completion_t cb, void *arg)
+{
+  clear_op_data *completion = (clear_op_data *)arg;
+  completion->handle_completion(cb);
+  delete completion;
+}
+
+void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_name){
   list<rgw_bucket_dir_entry> entries_to_detach;
   list<rgw_bucket_inlined_entry> detached_entries;
   for (auto &entry: entries) {
@@ -4180,21 +4197,34 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::fla
   }
 
   auto before_merge = ceph_clock_now();
+  uint32_t merged_obj_size;
   list<rgw_bucket_inlined_entry> entries_detached;
-  int r = _merge_heads_payload(shardItem, merge_obj_oid, entries_to_detach, entries_detached);
+  int r = _merge_heads_payload(shardItem, merge_obj_name, entries_to_detach, entries_detached, &merged_obj_size);
   ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << "  merge heads data of bucket: " << shardItem.bucket.name
                      << " shard:" << shardItem.oid << " obj cnt " << entries_to_detach.size() << " r:" << r <<dendl;
+  if (r < 0){
+    return;
+  }
 
   auto after_merge = ceph_clock_now();
   ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_detach.size()  << ", time taken: "<< (after_merge - before_merge) << dendl;
 
+  bool async_clear = wk->ctx()->_conf.get_val<bool>("rgw_async_clear_inlined_entry_head_data");
   auto before_clear = ceph_clock_now();
   librados::ObjectWriteOperation op;
   string oid = shardItem.oid;
   librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
   cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
-  cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_detached);
-  r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
+  cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_detached, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
+  if(async_clear){
+    clear_op_data *entry = new clear_op_data();
+    entry->dpp = dpp;
+    AioCompletion *c = librados::Rados::aio_create_completion(entry, clear_head_cb);
+    r = ioctx.aio_operate(oid, c, &op);
+  }else{
+    r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
+  }
+
   if (r < 0)
     ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] clear entries inlined data : " << shardItem.bucket.name
                       << " shard:" << shardItem.oid << " r: " << r << dendl;
@@ -4202,8 +4232,8 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::fla
   ldpp_dout(dpp, 20) << "cls_rgw_bucket_clear_inlined_entry_data_op items" << entries_detached.size() << " time taken: "<< (after_clear - before_clear) << dendl;
 }
 
-int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_oid,
-                                  list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_detached){
+int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
+                                  list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_detached, uint32_t *merged_obj_size){
   bufferlist merged_bl;
   for(auto entry: entries_to_detach){
     int offset = merged_bl.length();
@@ -4213,17 +4243,17 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_oid,
     d.key = cls_rgw_obj_key(entry.key.name);
     d.tag = entry.tag;
     d.inline_index_epoch = entry.meta.inline_index_epoch;
-    d.merge_obj_oid = merge_obj_oid;
+    d.merge_obj_name = merge_obj_name;
     d.offset = offset;
     entries_detached.emplace_back(d);
   }
 
   rgw::sal::RGWRadosStore *store = get_store();
-  rgw_obj merge_obj(shardItem.bucket, merge_obj_oid);
+  rgw_obj merge_obj(shardItem.bucket, merge_obj_name);
   rgw_rados_ref ref;
   int r = store->getRados()->get_obj_head_ref(dpp, shardItem.placement_rule, merge_obj, &ref);
   if (r < 0){
-    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get merge rgw_rados_ref failed obj :" << merge_obj_oid << " r: " << r << dendl;
+    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get merge rgw_rados_ref failed obj :" << merge_obj_name << " r: " << r << dendl;
     return r;
   }
   ref.obj.pool = ref.pool.get_pool();
@@ -4235,7 +4265,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_oid,
     map<string, bufferlist> attrs;
     r = store->getRados()->raw_obj_stat(dpp, ref.obj, &size, NULL, NULL, &attrs, NULL, NULL, null_yield);
     if(r < 0 && r != -ENOENT){
-      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get merge obj state :" << merge_obj_oid << " r: " << r << dendl;
+      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get merge obj state :" << merge_obj_name << " r: " << r << dendl;
       return r;
     }
     if (r == -ENOENT){
@@ -4269,6 +4299,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_oid,
     entry.offset += size; // update offset
     ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] obj " <<entry.key.name << " merged to " << ref.obj.oid << " offset: " << entry.offset << dendl;
   }
+  *merged_obj_size = size + merged_bl.length();
 
   return r;
 }
@@ -6878,7 +6909,7 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
       // issue concurrent ops to search rgw object state from both head object attr and bucket index entry
       auto start_time = ceph_clock_now();
       r = concurrentGetState.issue_op(&s->size, &s->mtime, &s->epoch, &s->attrset, (s->prefetch_data ? &s->data : NULL), NULL,
-                                      &s->inlined, &s->head_exists, &s->head_obj_tag, &s->head_rados_size, &s->merge_obj_oid, &s->offset);
+                                      &s->inlined, &s->head_exists, &s->head_obj_tag, &s->head_rados_size, &s->merge_obj_name, &s->offset);
       auto after_time = ceph_clock_now();
       ldpp_dout(dpp, 20) << "concurrent get object[" << ref.obj.oid << "] state time taken: "<< (after_time - start_time) << dendl;
 
@@ -8088,7 +8119,7 @@ int RGWRados::get_obj_iterate_cb(const DoutPrefixProvider *dpp,
   struct get_obj_data *d = (struct get_obj_data *)arg;
   string oid, key;
 
-  if (astate && !astate->merge_obj_oid.empty()) {
+  if (astate && !astate->merge_obj_name.empty()) {
     unsigned chunk_len = std::min(astate->size - obj_ofs, (uint64_t)len);
     auto obj = d->store->svc.rados->obj(merge_obj);
     int r = obj.open(dpp);
@@ -8097,11 +8128,11 @@ int RGWRados::get_obj_iterate_cb(const DoutPrefixProvider *dpp,
       return r;
     }
 
-    ldpp_dout(dpp, 20) << "rados->get_obj_iterate_cb oid=" << merge_obj.oid << " obj-ofs=" << obj_ofs << " len=" << len << dendl;
-    op.read(astate->offset + obj_ofs, len, nullptr, nullptr);
+    ldpp_dout(dpp, 20) << "rados->get_obj_iterate_cb oid=" << merge_obj.oid << " obj-ofs=" << obj_ofs << " len=" << len << " chunk_len=" << chunk_len << dendl;
+    op.read(astate->offset + obj_ofs, chunk_len, nullptr, nullptr);
 
-    const uint64_t cost = len;
-    const uint64_t id = astate->offset + obj_ofs; // use logical object offset for sorting replies
+    const uint64_t cost = chunk_len;
+    const uint64_t id = obj_ofs; // use logical object offset for sorting replies
     auto completed = d->aio->get(obj, rgw::Aio::librados_op(std::move(op), d->yield), cost, id);
     return d->flush(std::move(completed));
   }
@@ -8190,8 +8221,8 @@ int RGWRados::iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx,
     return r;
   }
 
-  if(!astate->merge_obj_oid.empty()){
-    rgw_obj merge_obj(bucket_info.bucket, astate->merge_obj_oid);
+  if(!astate->merge_obj_name.empty()){
+    rgw_obj merge_obj(bucket_info.bucket, astate->merge_obj_name);
     obj_to_raw(bucket_info.placement_rule, merge_obj, &raw_merge_obj);
   }
 
