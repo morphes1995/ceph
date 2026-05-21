@@ -247,15 +247,21 @@ void rgw_bucket_inlined_entry_index::dump(Formatter *f) const
 {
   encode_json("entry_size", entry_size, f);
   encode_json("delete_marker", delete_marker , f);
-  encode_json("detaching", detaching , f);
-  encode_json("start_timestamp", start_timestamp , f);
 }
 
 void rgw_bucket_inlined_entry_index::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("entry_size", entry_size, obj);
   JSONDecoder::decode_json("delete_marker", delete_marker , obj);
-  JSONDecoder::decode_json("detaching", detaching , obj);
-  JSONDecoder::decode_json("start_timestamp", start_timestamp , obj);
+}
+
+void rgw_merge_obj_stale_frag::dump(Formatter *f) const{
+  encode_json("offset", offset , f);
+  encode_json("size", size , f);
+}
+
+void rgw_merge_obj_stale_frag::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("offset", offset , obj);
+  JSONDecoder::decode_json("size", size , obj);
 }
 
 static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *formatter)
@@ -284,6 +290,13 @@ static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *form
         encode_json("entry", entry, formatter);
       }
       break;
+    case BIIndexType::StaleFrag:
+    {
+      rgw_merge_obj_stale_frag entry;
+      decode(entry, iter);
+      encode_json("entry", entry, formatter);
+    }
+      break;
     default:
       break;
   }
@@ -301,6 +314,8 @@ void rgw_cls_bi_entry::decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key)
     type = BIIndexType::OLH;
   }else if (s == "inlined_idx") {
     type = BIIndexType::InlinedIdx;
+  }else if (s == "stale_frag") {
+    type = BIIndexType::StaleFrag;
   }else {
     type = BIIndexType::Invalid;
   }
@@ -343,6 +358,20 @@ void rgw_cls_bi_entry::decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key)
         }
       }
       break;
+    case BIIndexType::StaleFrag:
+    {
+      rgw_merge_obj_stale_frag entry;
+      JSONDecoder::decode_json("entry", entry, obj);
+      encode(entry, data);
+
+      if (effective_key) {
+        cls_rgw_obj_key key;
+        key.name = idx.substr(6);
+        key.instance ="";
+        *effective_key = key;
+      }
+    }
+      break;
     default:
       break;
   }
@@ -363,6 +392,9 @@ void rgw_cls_bi_entry::dump(Formatter *f) const
     break;
   case BIIndexType::InlinedIdx:
     type_str = "inlined_idx";
+    break;
+  case BIIndexType::StaleFrag:
+    type_str = "stale_frag";
     break;
   default:
     type_str = "invalid";
@@ -415,6 +447,16 @@ bool rgw_cls_bi_entry::get_info(cls_rgw_obj_key *key,
         *category = RGWObjCategory::Main;
         accounted_stats->inlined_entry_num += 1;
         accounted_stats->inlined_total_entry_size += entry.entry_size;
+      }
+      break;
+    case BIIndexType::StaleFrag:
+      {
+        rgw_merge_obj_stale_frag entry;
+        decode(entry, iter);
+        if(key){
+          key->name = idx.substr(6);
+          key->instance ="";
+        }
       }
       break;
     default:
@@ -689,6 +731,30 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
   utime_t ut(acquire_time);
   encode_json("acquire_time", ut, f);
   f->dump_int("current_merge_obj_id", current_merge_obj_id);
+
+  merge_obj_stats.dump(f);
+}
+
+void rgw_merge_object_stat::dump(Formatter *f) const {
+  f->dump_int("size", size);
+  f->dump_int("size_to_release", size_to_release);
+  f->dump_bool("writing", writing);
+}
+
+void rgw_merge_object_stats::dump(Formatter *f) const {
+  f->open_array_section("merge_obj_stale_frags_stats");
+  for (auto iter = stats.begin(); iter != stats.end(); ++iter) {
+    f->open_object_section("shard");
+    f->dump_int("shard", int(iter->first));
+    for (auto iter2 = iter->second.begin(); iter2 != iter->second.end(); ++iter2) {
+      f->open_object_section("merge_object");
+      f->dump_int("merge_object_id", int(iter2->first));
+      iter2->second.dump(f);
+      f->close_section();
+    }
+    f->close_section();
+  }
+  f->close_section();
 }
 
 void rgw_bucket_dir::generate_test_instances(list<rgw_bucket_dir*>& o)

@@ -3172,6 +3172,7 @@ int main(int argc, const char **argv)
   int max_quota_pct = -1;
   int tiny_obj_size_kb = -1;
   int inlined_obj_max_size_mb = -1;
+  int fetch_stale_frags_stat = false;
 
   int warnings_only = false;
   int inconsistent_index = false;
@@ -3535,6 +3536,8 @@ int main(int argc, const char **argv)
         cerr << "ERROR: inlined_obj_max_size_mb must >= 0" << std::endl;
         return EINVAL;
       }
+    }else if (ceph_argparse_binary_flag(args, i, &fetch_stale_frags_stat, NULL, "--fetch_stale_frags_stat", (char*)NULL)) {
+      // do nothing
     }else if (ceph_argparse_binary_flag(args, i, &warnings_only, NULL, "--warnings-only", (char*)NULL)) {
      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &inconsistent_index, NULL, "--inconsistent-index", (char*)NULL)) {
@@ -6262,6 +6265,7 @@ int main(int argc, const char **argv)
       bucket_op.set_bucket_name(bucket.name);
     }
     bucket_op.set_fetch_stats(true);
+    bucket_op.set_fetch_stale_frags_stats(fetch_stale_frags_stat);
 
     int r = RGWBucketAdminOp::info(store, bucket_op, f, null_yield, dpp());
     if (r < 0) {

@@ -4215,7 +4215,7 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::fla
   string oid = shardItem.oid;
   librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
   cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
-  cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_detached, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
+  cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_detached, merge_obj_name, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
   if(async_clear){
     clear_op_data *entry = new clear_op_data();
     entry->dpp = dpp;
@@ -4243,7 +4243,6 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
     d.key = cls_rgw_obj_key(entry.key.name);
     d.tag = entry.tag;
     d.inline_index_epoch = entry.meta.inline_index_epoch;
-    d.merge_obj_name = merge_obj_name;
     d.offset = offset;
     entries_detached.emplace_back(d);
   }
@@ -4286,6 +4285,16 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
     encode(id_tag, id_tag_bl);
     op.setxattr(RGW_ATTR_ID_TAG, id_tag_bl);
     op.append(merged_bl);
+
+    // keep tiny objects offset info in omap
+    rgw_object_offsets_info offsets_info;
+    bufferlist offsets_bl;
+    for(auto &entry: entries_detached){
+      offsets_info.offsets.emplace_back(rgw_object_offset(size + entry.offset, entry.key.name));
+    }
+    encode(offsets_info, offsets_bl);
+    std::map<std::string, bufferlist> map = {{"offsets_" + to_string(size), offsets_bl}};
+    op.omap_set(map);
 
     auto& ioctx = ref.pool.ioctx();
     r = ioctx.operate(ref.obj.oid, &op);
@@ -4485,7 +4494,7 @@ void RGWRadosDetacher::try_disable_object_inline(string &bucket_id){
   string master_ver;
   map<RGWObjCategory, RGWStorageStats> bucket_stats;
   ret = store->getRados()->get_bucket_stats(dpp, bucket->get_info(), RGW_NO_SHARD, &bucket_ver,
-                                          &master_ver, bucket_stats, nullptr);
+                                          &master_ver, bucket_stats, nullptr, nullptr);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << __func__  <<"could not get bucket stats for bucket="
                       << bucket_name << dendl;
@@ -5905,6 +5914,14 @@ static void accumulate_raw_stats(const rgw_bucket_dir_header& header,
 
     s.inlined_entry_num += header_stats.inlined_entry_num;
     s.inlined_total_entry_size += header_stats.inlined_total_entry_size;
+  }
+}
+
+static void accumulate_stale_frags(const rgw_bucket_dir_header& header,
+                                       rgw_merge_object_stats *merge_objects_stale_frags)
+{
+  for (const auto& pair: header.merge_obj_stats.stats) {
+    merge_objects_stale_frags->stats[pair.first] = pair.second;
   }
 }
 
@@ -9493,7 +9510,7 @@ int RGWRados::raw_obj_stat(const DoutPrefixProvider *dpp,
 }
 
 int RGWRados::get_bucket_stats(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_info, int shard_id, string *bucket_ver, string *master_ver,
-    map<RGWObjCategory, RGWStorageStats>& stats, string *max_marker, bool *syncstopped)
+    map<RGWObjCategory, RGWStorageStats>& stats, rgw_merge_object_stats *merge_objects_stale_frags, string *max_marker, bool *syncstopped)
 {
   vector<rgw_bucket_dir_header> headers;
   map<int, string> bucket_instance_ids;
@@ -9512,6 +9529,9 @@ int RGWRados::get_bucket_stats(const DoutPrefixProvider *dpp, RGWBucketInfo& buc
   char buf[64];
   for(; iter != headers.end(); ++iter, ++viter) {
     accumulate_raw_stats(*iter, stats);
+    if(merge_objects_stale_frags != NULL){
+      accumulate_stale_frags(*iter, merge_objects_stale_frags);
+    }
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)iter->ver);
     ver_mgr.add(viter->first, string(buf));
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)iter->master_ver);

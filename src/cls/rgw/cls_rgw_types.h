@@ -4,6 +4,7 @@
 #pragma once
 
 #include <boost/container/flat_map.hpp>
+#include <boost/algorithm/string.hpp>
 #include "common/ceph_time.h"
 #include "common/Formatter.h"
 
@@ -554,8 +555,6 @@ WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 struct rgw_bucket_inlined_entry_index {
     uint64_t entry_size;
     bool delete_marker;
-    bool detaching;
-    ceph::real_time start_timestamp;
 
     rgw_bucket_inlined_entry_index() : entry_size(0), delete_marker(false) {}
 
@@ -563,23 +562,40 @@ struct rgw_bucket_inlined_entry_index {
       ENCODE_START(1, 1, bl);
         encode(entry_size, bl);
         encode(delete_marker, bl);
-        encode(detaching, bl);
-        encode(start_timestamp, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
       DECODE_START(1, bl);
         decode(entry_size, bl);
         decode(delete_marker, bl);
-        decode(detaching, bl);
-        decode(start_timestamp, bl);
       DECODE_FINISH(bl);
     }
     void dump(ceph::Formatter *f) const;
     void decode_json(JSONObj *obj);
 };
-
 WRITE_CLASS_ENCODER(rgw_bucket_inlined_entry_index)
+
+struct rgw_merge_obj_stale_frag {
+    uint32_t offset;
+    uint32_t size;
+    rgw_merge_obj_stale_frag() : offset(0), size(0) {}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(offset, bl);
+        encode(size, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START(1, bl);
+        decode(offset, bl);
+        decode(size, bl);
+      DECODE_FINISH(bl);
+    }
+    void dump(ceph::Formatter *f) const;
+    void decode_json(JSONObj *obj);
+};
+WRITE_CLASS_ENCODER(rgw_merge_obj_stale_frag)
 
 enum class BIIndexType : uint8_t {
   Invalid    = 0,
@@ -587,6 +603,7 @@ enum class BIIndexType : uint8_t {
   Instance   = 2,
   OLH        = 3,
   InlinedIdx = 4,
+  StaleFrag  = 5,
 };
 
 struct rgw_bucket_category_stats;
@@ -896,6 +913,113 @@ struct cls_rgw_bucket_instance_entry {
 };
 WRITE_CLASS_ENCODER(cls_rgw_bucket_instance_entry)
 
+struct rgw_merge_object_stat {
+    uint32_t size;
+    uint32_t size_to_release;
+    bool writing;
+    rgw_merge_object_stat(): size(0), size_to_release(0), writing(true){}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(size, bl);
+        encode(size_to_release, bl);
+        encode(writing, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(size, bl);
+        decode(size_to_release, bl);
+        decode(writing, bl);
+      DECODE_FINISH(bl);
+    }
+    void dump(ceph::Formatter *f) const;
+
+};
+WRITE_CLASS_ENCODER(rgw_merge_object_stat)
+
+struct rgw_merge_object_stats {
+    std::map<uint16_t, std::map<uint32_t,rgw_merge_object_stat>> stats; // shard_id -> <merge_obj_id, stat>
+    rgw_merge_object_stats(){}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(stats, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(stats, bl);
+      DECODE_FINISH(bl);
+    }
+    void dump(ceph::Formatter *f) const;
+
+    void _parse_name(string &merge_obj_name, int *shard_id, int *merge_obj_id){
+      vector<std::string> fields;
+      boost::split(fields, merge_obj_name, boost::is_any_of("_"));
+      *shard_id = atoi(fields[fields.size()-2].c_str());
+      *merge_obj_id = atoi(fields[fields.size()-1].c_str());
+    }
+
+    void add_stale_frag(string &merge_obj_name, uint64_t size){
+      int shard_id;
+      int merge_obj_id;
+      _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
+      stats[shard_id][merge_obj_id].size_to_release += size;
+    }
+
+    void set_merge_obj_size(string &merge_obj_name, uint32_t size){
+      int shard_id;
+      int merge_obj_id;
+      _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
+      stats[shard_id][merge_obj_id].size = size;
+    }
+
+    void mark_readonly(string &merge_obj_name){
+      int shard_id;
+      int merge_obj_id;
+      _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
+      stats[shard_id][merge_obj_id].writing = false;
+    }
+
+};
+WRITE_CLASS_ENCODER(rgw_merge_object_stats)
+
+struct rgw_object_offset{
+    uint32_t offset;
+    string obj_name;
+    rgw_object_offset() {}
+    rgw_object_offset(uint32_t off, string &name): offset(off), obj_name(name) {}
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(offset, bl);
+        encode(obj_name, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(offset, bl);
+        decode(obj_name, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_object_offset)
+
+struct rgw_object_offsets_info{
+    std::list<rgw_object_offset> offsets;
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(offsets, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(offsets, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_object_offsets_info)
+
 struct rgw_bucket_dir_header {
   std::map<RGWObjCategory, rgw_bucket_category_stats> stats;
   uint64_t tag_timeout;
@@ -908,7 +1032,9 @@ struct rgw_bucket_dir_header {
   // lease info
   std::string rgw_instance_hold_lease;
   ceph::real_time  acquire_time;
+
   uint64_t current_merge_obj_id;
+  rgw_merge_object_stats merge_obj_stats;
 
   rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false) ,current_merge_obj_id(1){}
 
@@ -924,6 +1050,7 @@ struct rgw_bucket_dir_header {
     encode(rgw_instance_hold_lease, bl);
     encode(acquire_time, bl);
     encode(current_merge_obj_id, bl);
+    encode(merge_obj_stats, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -955,6 +1082,7 @@ struct rgw_bucket_dir_header {
       decode(rgw_instance_hold_lease, bl);
       decode(acquire_time, bl);
       decode(current_merge_obj_id, bl);
+      decode(merge_obj_stats, bl);
     }
     DECODE_FINISH(bl);
   }

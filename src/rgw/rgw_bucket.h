@@ -256,6 +256,7 @@ struct RGWBucketAdminOpState {
 
   bool list_buckets;
   bool stat_buckets;
+  bool stale_frags_stat;
   bool check_objects;
   bool fix_index;
   bool delete_child_objects;
@@ -278,6 +279,7 @@ struct RGWBucketAdminOpState {
   RGWQuotaInfo quota;
 
   void set_fetch_stats(bool value) { stat_buckets = value; }
+  void set_fetch_stale_frags_stats(bool value) { stale_frags_stat = value; }
   void set_check_objects(bool value) { check_objects = value; }
   void set_fix_index(bool value) { fix_index = value; }
   void set_delete_children(bool value) { delete_child_objects = value; }

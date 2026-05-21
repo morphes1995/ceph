@@ -385,7 +385,7 @@ int rgw_remove_bucket_bypass_gc(rgw::sal::RGWRadosStore *store, rgw_bucket& buck
   if (ret < 0)
     return ret;
 
-  ret = store->getRados()->get_bucket_stats(dpp, info, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, NULL);
+  ret = store->getRados()->get_bucket_stats(dpp, info, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, NULL, NULL);
   if (ret < 0)
     return ret;
 
@@ -1553,11 +1553,13 @@ int RGWBucketAdminOp::obj_inline_config(rgw::sal::RGWRadosStore *store, RGWBucke
 static int bucket_stats(rgw::sal::RGWRadosStore *store,
 			const std::string& tenant_name,
 			const std::string& bucket_name,
+      bool fetch_stale_frags_stat,
 			Formatter *formatter,
                         const DoutPrefixProvider *dpp)
 {
   RGWBucketInfo bucket_info;
   map<RGWObjCategory, RGWStorageStats> stats;
+  rgw_merge_object_stats merge_objects_stale_frags;
   map<string, bufferlist> attrs;
 
   real_time mtime;
@@ -1573,7 +1575,7 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   string bucket_ver, master_ver;
   string max_marker;
   int ret = store->getRados()->get_bucket_stats(dpp, bucket_info, RGW_NO_SHARD,
-						&bucket_ver, &master_ver, stats,
+						&bucket_ver, &master_ver, stats, &merge_objects_stale_frags,
 						&max_marker);
   if (ret < 0) {
     cerr << "error getting bucket stats bucket=" << bucket.name << " ret=" << ret << std::endl;
@@ -1618,6 +1620,17 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   formatter->dump_int("bucket_stats_refresh_interval_sec", bucket_info.bucket_stats_refresh_interval);
   formatter->dump_int("max_quota_allowed_pct", bucket_info.max_quota_pct_to_allow_inline);
   formatter->dump_int("inlined_obj_max_size_mb", bucket_info.inlined_obj_max_size_mb);
+
+  uint64_t total_merge_obj_stale_frags_size = 0;
+  for (const auto& pair: merge_objects_stale_frags.stats) {
+    for (const auto& iter: pair.second) {
+      total_merge_obj_stale_frags_size += iter.second.size_to_release;
+    }
+  }
+  formatter->dump_int("total_merge_obj_stale_frags_size_mb", total_merge_obj_stale_frags_size >> 10 >> 10);
+  if(fetch_stale_frags_stat){
+    merge_objects_stale_frags.dump(formatter);
+  }
 
   // bucket tags
   auto iter = attrs.find(RGW_ATTR_TAGS);
@@ -1703,7 +1716,7 @@ int RGWBucketAdminOp::limit_check(rgw::sal::RGWRadosStore *store,
 	string bucket_ver, master_ver;
 	std::map<RGWObjCategory, RGWStorageStats> stats;
 	ret = store->getRados()->get_bucket_stats(dpp, info, RGW_NO_SHARD, &bucket_ver,
-				      &master_ver, stats, nullptr);
+				      &master_ver, stats, nullptr, nullptr);
 
 	if (ret < 0)
 	  continue;
@@ -1809,7 +1822,7 @@ int RGWBucketAdminOp::info(rgw::sal::RGWRadosStore *store,
         }
 
         if (show_stats) {
-          bucket_stats(store, user_id.tenant, obj_name, formatter, dpp);
+          bucket_stats(store, user_id.tenant, obj_name, op_state.stale_frags_stat, formatter, dpp);
 	} else {
           formatter->dump_string("bucket", obj_name);
 	}
@@ -1825,7 +1838,7 @@ int RGWBucketAdminOp::info(rgw::sal::RGWRadosStore *store,
 
     formatter->close_section();
   } else if (!bucket_name.empty()) {
-    ret = bucket_stats(store, user_id.tenant, bucket_name, formatter, dpp);
+    ret = bucket_stats(store, user_id.tenant, bucket_name, op_state.stale_frags_stat, formatter, dpp);
     if (ret < 0) {
       return ret;
     }
@@ -1842,7 +1855,7 @@ int RGWBucketAdminOp::info(rgw::sal::RGWRadosStore *store,
 						   &truncated);
       for (auto& bucket_name : buckets) {
         if (show_stats) {
-          bucket_stats(store, user_id.tenant, bucket_name, formatter, dpp);
+          bucket_stats(store, user_id.tenant, bucket_name, op_state.stale_frags_stat, formatter, dpp);
 	} else {
           formatter->dump_string("bucket", bucket_name);
 	}

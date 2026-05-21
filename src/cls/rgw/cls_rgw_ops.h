@@ -489,7 +489,6 @@ struct rgw_bucket_inlined_entry {
     cls_rgw_obj_key key;
     std::string tag;
     uint64_t inline_index_epoch;
-    string merge_obj_name;
     uint32_t offset;
 
     rgw_bucket_inlined_entry() : inline_index_epoch(0) {}
@@ -499,7 +498,6 @@ struct rgw_bucket_inlined_entry {
         encode(key, bl);
         encode(tag, bl);
         encode(inline_index_epoch, bl);
-        encode(merge_obj_name, bl);
         encode(offset, bl);
       ENCODE_FINISH(bl);
     }
@@ -508,7 +506,6 @@ struct rgw_bucket_inlined_entry {
         decode(key, bl);
         decode(tag, bl);
         decode(inline_index_epoch, bl);
-        decode(merge_obj_name, bl);
         decode(offset, bl);
       DECODE_FINISH(bl);
     }
@@ -518,22 +515,25 @@ struct rgw_bucket_inlined_entry {
 WRITE_CLASS_ENCODER(rgw_bucket_inlined_entry)
 
 struct rgw_cls_clear_inlined_data_op {
+    string merge_obj_name;
     uint32_t merged_obj_size;
     uint32_t rgw_merge_object_max_size_mb;
     list<rgw_bucket_inlined_entry> entries;
 
     void encode(ceph::buffer::list &bl) const {
       ENCODE_START(1, 1, bl);
-        encode(entries, bl);
+        encode(merge_obj_name, bl);
         encode(merged_obj_size, bl);
         encode(rgw_merge_object_max_size_mb, bl);
+        encode(entries, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
       DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
-        decode(entries, bl);
+        decode(merge_obj_name, bl);
         decode(merged_obj_size, bl);
         decode(rgw_merge_object_max_size_mb, bl);
+        decode(entries, bl);
       DECODE_FINISH(bl);
     }
     void dump(ceph::Formatter *f) const;

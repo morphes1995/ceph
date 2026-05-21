@@ -6090,7 +6090,7 @@ std::vector<Option> get_rgw_options() {
             .set_description("detach worker shard lease hold interval")
             .set_long_description("etach worker shard lease hold interval"),
     Option("rgw_merge_object_max_size_mb", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(64)
+            .set_default(100)
             .set_description("when tiny rgw object payload data merged to big rados object, the max size of big rados object")
             .set_long_description("when tiny rgw object payload data merged to big rados object, the max size of big rados object, must smaller than osd_max_object_size")
             .add_see_also("osd_max_object_size"),

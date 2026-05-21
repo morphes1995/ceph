@@ -47,14 +47,16 @@ CLS_NAME(rgw)
 #define BI_BUCKET_OBJ_INSTANCE_INDEX  2
 #define BI_BUCKET_OLH_DATA_INDEX      3
 #define BI_BUCKET_INLINED_OBJ_INDEX   4
+#define BI_BUCKET_STALE_FRAG_INDEX    5
 
-#define BI_BUCKET_LAST_INDEX          5
+#define BI_BUCKET_LAST_INDEX          6
 
 static std::string bucket_index_prefixes[] = { "", /* special handling for the objs list index */
 					       "0_",     /* bucket log index */
 					       "1000_",  /* obj instance index */
 					       "1001_",  /* olh data index */
                  "2001_", /* inlined entry index */
+                 "3001_", /* merge object stale fragment index */
 
 					       /* this must be the last index */
 					       "9999_",};
@@ -347,6 +349,20 @@ static void encode_inlined_entry_key(const cls_rgw_obj_key& key, string *index_k
 static void decode_inlined_entry_key(const string& index_key, cls_rgw_obj_key *key)
 {
   key->name = index_key.substr(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX].size() + 1);
+  key->instance = "";
+}
+
+static void encode_stale_frag_key(const string &merge_obj_name, uint32_t offset, string *index_key)
+{
+  *index_key = BI_PREFIX_CHAR;
+  index_key->append(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX]);
+  index_key->append(merge_obj_name);
+  index_key->append("_");
+  index_key->append(to_string(offset));
+}
+static void decode_stale_frag_key(const string& index_key, cls_rgw_obj_key *key)
+{
+  key->name = index_key.substr(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX].size() + 1);
   key->instance = "";
 }
 
@@ -1196,6 +1212,22 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       }
     }
 
+    // record stale fragment in merge object, will be vacuumed in background
+    if (!entry.meta.merge_obj_name.empty()){
+      header.merge_obj_stats.add_stale_frag(entry.meta.merge_obj_name, entry.meta.size);
+      std::string stale_frag_key;
+      encode_stale_frag_key(entry.meta.merge_obj_name, entry.meta.offset, &stale_frag_key);
+      rgw_merge_obj_stale_frag stale_frag;
+      stale_frag.offset = entry.meta.offset;
+      stale_frag.size = entry.meta.size;
+      bufferlist stale_frag_bl;
+      encode(stale_frag, stale_frag_bl);
+      rc = cls_cxx_map_set_val(hctx, stale_frag_key, &stale_frag_bl);
+      if (rc < 0) {
+        return rc;
+      }
+    }
+
     rgw_bucket_dir_entry_meta& meta = op.meta;
     entry.meta = meta;
     entry.key = op.key;
@@ -1310,8 +1342,23 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
       }
     }
 
+    // record stale fragment in merge object, will be vacuumed by rgw background thread
+    if (!entry.meta.merge_obj_name.empty()){
+      header.merge_obj_stats.add_stale_frag(entry.meta.merge_obj_name, entry.meta.size);
+      std::string stale_frag_key;
+      encode_stale_frag_key(entry.meta.merge_obj_name, entry.meta.offset, &stale_frag_key);
+      rgw_merge_obj_stale_frag stale_frag;
+      stale_frag.offset = entry.meta.offset;
+      stale_frag.size = entry.meta.size;
+      bufferlist stale_frag_bl;
+      encode(stale_frag, stale_frag_bl);
+      rc = cls_cxx_map_set_val(hctx, stale_frag_key, &stale_frag_bl);
+      if (rc < 0) {
+        return rc;
+      }
+    }
+
     entry.key = op.key;
-//  entry.ver = op.ver;
     entry.meta = op.meta;
     entry.meta.inline_index_epoch = cls_current_version(hctx);
     entry.locator = op.locator;
@@ -1631,7 +1678,7 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
     }
 
     /*
-     * we heed consider 4 cases here:
+     * we need consider 4 cases here:
      * 1. entry was already deleted
      * 2. entry was overwritten by big object
      * 3. entry was overwritten by small object
@@ -1654,7 +1701,20 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
       if(!entry.meta.merge_obj_name.empty()){
         CLS_LOG(10, "WARNING: %s: inlined index key %s head data already merged to %s:%d, data in %s:%d is redundant",
                 __func__, inlined_index_key.c_str(),
-                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op_entry.merge_obj_name.c_str(), op_entry.offset);
+                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op.merge_obj_name.c_str(), op_entry.offset);
+        // record stale fragment in merge object, will be vacuumed in background
+        header.merge_obj_stats.add_stale_frag(op.merge_obj_name, entry.meta.size);
+        std::string stale_frag_key;
+        encode_stale_frag_key(op.merge_obj_name, op_entry.offset, &stale_frag_key);
+        rgw_merge_obj_stale_frag stale_frag;
+        stale_frag.offset = op_entry.offset;
+        stale_frag.size = entry.meta.size;
+        bufferlist stale_frag_bl;
+        encode(stale_frag, stale_frag_bl);
+        rc = cls_cxx_map_set_val(hctx, stale_frag_key, &stale_frag_bl);
+        if (rc < 0) {
+          return rc;
+        }
         continue;
       }
 
@@ -1667,7 +1727,7 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
         entry.meta.head_data_size = 0;
 
         // tiny object payload data position
-        entry.meta.merge_obj_name = op_entry.merge_obj_name;
+        entry.meta.merge_obj_name = op.merge_obj_name;
         entry.meta.offset = op_entry.offset;
 
         bufferlist entry_bl;
@@ -1702,7 +1762,9 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
     }
   }
 
+  header.merge_obj_stats.set_merge_obj_size(op.merge_obj_name, op.merged_obj_size);
   if(op.merged_obj_size >= (op.rgw_merge_object_max_size_mb<<10<<10)){
+    header.merge_obj_stats.mark_readonly(op.merge_obj_name);
     header.current_merge_obj_id ++; // switch to next merge big object
   }
 
@@ -3718,7 +3780,7 @@ static int list_inlined_index_entries(cls_method_context_t hctx,
   if (max > 0) {
     ret = cls_cxx_map_get_vals(hctx, start_after_key, string(), max,
                                &keys, pmore);
-    CLS_LOG(20, "%s: start_after_key=\"%s\", first_instance_idx=\"%s\", keys.size()=%d",
+    CLS_LOG(20, "%s: start_after_key=\"%s\", first_inlined_idx=\"%s\", keys.size()=%d",
             __func__, escape_str(start_after_key).c_str(),
             escape_str(first_inlined_idx).c_str(), (int)keys.size());
     if (ret < 0) {
@@ -3748,6 +3810,94 @@ static int list_inlined_index_entries(cls_method_context_t hctx,
 
     cls_rgw_obj_key key;
     decode_inlined_entry_key(entry.idx, &key);
+
+    if (!name.empty() && key.name != name) {
+      /* we are skipping the rest of the entries */
+      if (pmore) {
+        *pmore = false;
+      }
+      return count;
+    }
+
+    entries->push_back(entry);
+    count++;
+    start_after_key = entry.idx;
+  }
+
+  return count;
+}
+
+static int list_stale_frag_entries(cls_method_context_t hctx,
+                                      const string& name,
+                                      const string& marker,
+                                      uint32_t max,
+                                      list<rgw_cls_bi_entry> *entries,
+                                      bool *pmore)
+{
+  string first_stale_frag_idx;
+  first_stale_frag_idx = BI_PREFIX_CHAR;
+  first_stale_frag_idx.append(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX]);
+  first_stale_frag_idx.append(name);
+
+  string start_after_key;
+
+  if (!name.empty()) {
+    start_after_key = first_stale_frag_idx;
+  } else {
+    start_after_key = BI_PREFIX_CHAR;
+    start_after_key.append(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX]);
+  }
+  string filter = start_after_key;
+  if (bi_entry_gt(marker, start_after_key)) {
+    start_after_key = marker;
+  }
+  int count = 0;
+  map<string, bufferlist> keys;
+  int ret;
+  bufferlist k;
+  ret = cls_cxx_map_get_val(hctx, start_after_key, &k);
+  if (ret < 0 && ret != -ENOENT) {
+    return ret;
+  }
+  // we need to include the exact match if a filter (name) is
+  // specified and the marker has not yet advanced (i.e., been set)
+  bool found_first = (ret == 0) && (start_after_key != marker);
+  if (found_first) {
+    --max;
+  }
+  if (max > 0) {
+    ret = cls_cxx_map_get_vals(hctx, start_after_key, string(), max,
+                               &keys, pmore);
+    CLS_LOG(20, "%s: start_after_key=\"%s\", first_stale_frag_idx=\"%s\", keys.size()=%d",
+            __func__, escape_str(start_after_key).c_str(),
+            escape_str(first_stale_frag_idx).c_str(), (int)keys.size());
+    if (ret < 0) {
+      return ret;
+    }
+  }
+
+  if (found_first) {
+    keys[start_after_key] = std::move(k);
+  }
+
+  for (auto iter = keys.begin(); iter != keys.end(); ++iter) {
+    rgw_cls_bi_entry entry;
+    entry.type = BIIndexType::StaleFrag;
+    entry.idx = iter->first;
+    entry.data = iter->second;
+
+    if (!filter.empty() && entry.idx.compare(0, filter.size(), filter) != 0) {
+      /* we are skipping the rest of the entries */
+      if (pmore) {
+        *pmore = false;
+      }
+      return count;
+    }
+
+    CLS_LOG(20, "%s: entry.idx=\"%s\"", __func__, escape_str(entry.idx).c_str());
+
+    cls_rgw_obj_key key;
+    decode_stale_frag_key(entry.idx, &key);
 
     if (!name.empty() && key.name != name) {
       /* we are skipping the rest of the entries */
@@ -3854,7 +4004,18 @@ static int rgw_bi_list_op(cls_method_context_t hctx,
     }
 
     count += ret;
-    CLS_LOG(20, "%s: found %d olh entries, count=%u", __func__, ret, count);
+    CLS_LOG(20, "%s: found %d inlined index entries, count=%u", __func__, ret, count);
+  }
+
+  if (!more) {
+    ret = list_stale_frag_entries(hctx, op.name_filter, op.marker, max - count, &op_ret.entries, &more);
+    if (ret < 0) {
+      CLS_LOG(0, "ERROR: %s: list_stale_frag_entries returned ret=%d", __func__, ret);
+      return ret;
+    }
+
+    count += ret;
+    CLS_LOG(20, "%s: found %d stale frag entries, count=%u", __func__, ret, count);
   }
 
   if (!more) {

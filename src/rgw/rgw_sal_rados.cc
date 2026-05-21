@@ -223,7 +223,7 @@ int RGWRadosBucket::get_bucket_stats(const DoutPrefixProvider *dpp, RGWBucketInf
 				     std::map<RGWObjCategory, RGWStorageStats>& stats,
 				     std::string *max_marker, bool *syncstopped)
 {
-  return store->getRados()->get_bucket_stats(dpp, bucket_info, shard_id, bucket_ver, master_ver, stats, max_marker, syncstopped);
+  return store->getRados()->get_bucket_stats(dpp, bucket_info, shard_id, bucket_ver, master_ver, stats, nullptr, max_marker, syncstopped);
 }
 
 int RGWRadosBucket::read_bucket_stats(const DoutPrefixProvider *dpp, optional_yield y)
