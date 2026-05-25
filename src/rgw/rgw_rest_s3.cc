@@ -4659,6 +4659,27 @@ int RGWHandler_REST_S3::init_from_header(rgw::sal::RGWRadosStore *store,
   s->info.args.set(p);
   s->info.args.parse(s);
 
+  std::string input(s->info.env->get("HTTP_AUTHORIZATION", ""));
+  vector<string> vec;
+  for_each_substr(input, ",", [&vec] (auto token) {
+      vec.emplace_back(token.begin(), token.end());
+  });
+  std::map<std::string_view, std::string_view> kv;
+  for (const auto& str : vec) {
+    const auto parsed_pair = parse_key_value(str);
+    if (parsed_pair) {
+      if (parsed_pair->first == "SignedHeaders"){
+        auto val = parsed_pair->second;
+        for_each_substr(val, ";", [&s] (auto hdr) {
+            if(hdr == RGW_TRASH_OBJ_RESTORE || hdr == RGW_TRASH_FORCE_DELETE || hdr == RGW_TRASH_SHOW){
+              string hdr_str(hdr);
+              s->info.args.append(hdr_str, "");
+            }
+        });
+      }
+    }
+  }
+
   /* must be called after the args parsing */
   int ret = allocate_formatter(s, default_formatter, configurable_format);
   if (ret < 0)

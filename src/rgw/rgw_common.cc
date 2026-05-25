@@ -835,6 +835,9 @@ void RGWHTTPArgs::append(const string& name, const string& val)
     sys_val_map[name] = val;
   } else {
     val_map[name] = val;
+    if(name == "prefix" && val.substr(0,7) == ".trash/"){
+      val_map[RGW_TRASH_SHOW] = true;
+    }
   }
 
   if ((name.compare("acl") == 0) ||
