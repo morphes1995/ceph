@@ -1173,47 +1173,14 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       }
     }
   } // CLS_RGW_OP_CANCEL
-  else if (op.op == CLS_RGW_OP_DEL) {
-    // unaccount deleted entry
+  else{
+    // unaccount deleted/overwritten entry
     if (op.update_quota_stats){
-        unaccount_entry(header, entry);
-    }
-
-    entry.meta = op.meta;
-    if (!ondisk) {
-      // no entry to erase
-      log_op = false;
-    } else if (!entry.pending_map.size()) {
-      ceph_assert(!entry.meta.inline_head);
-      rc = cls_cxx_map_remove_key(hctx, idx);
-      if (rc < 0) {
-        return rc;
-      }
-    } else {
-      entry.exists = false;
-      bufferlist new_key_bl;
-      encode(entry, new_key_bl);
-      rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
-      if (rc < 0) {
-        return rc;
-      }
-    }
-  } // CLS_RGW_OP_DEL
-  else if (op.op == CLS_RGW_OP_ADD) {
-    // unaccount overwritten entry
-    if (op.update_quota_stats){
-        unaccount_entry(header, entry);
-      if(entry_already_inline && entry.meta.merge_obj_name.empty()){
-        rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
-        ceph_assert(stats.inlined_total_entry_size > 0);
-        ceph_assert(stats.inlined_entry_num > 0);
-        stats.inlined_entry_num --;
-        stats.inlined_total_entry_size -= entry.meta.size;
-      }
+      unaccount_entry(header, entry);
     }
 
     // record stale fragment in merge object, will be vacuumed in background
-    if (!entry.meta.merge_obj_name.empty()){
+    if (entry_already_inline && !entry.meta.merge_obj_name.empty()){
       header.merge_obj_stats.add_stale_frag(entry.meta.merge_obj_name, entry.meta.size);
       std::string stale_frag_key;
       encode_stale_frag_key(entry.meta.merge_obj_name, entry.meta.offset, &stale_frag_key);
@@ -1228,27 +1195,11 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       }
     }
 
-    rgw_bucket_dir_entry_meta& meta = op.meta;
-    entry.meta = meta;
-    entry.key = op.key;
-    entry.exists = true;
-    entry.tag = op.tag;
-    if (op.update_quota_stats){
-        rgw_bucket_category_stats& stats = header.stats[meta.category];
-        // account for new entry
-        stats.num_entries++;
-        stats.total_size += meta.accounted_size;
-        stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
-        stats.actual_size += meta.size;
-    }
-    bufferlist new_key_bl;
-    encode(entry, new_key_bl);
-    rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
-    if (rc < 0) {
-      return rc;
-    }
+    if (entry_already_inline && entry.meta.merge_obj_name.empty()){
+      rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+      stats.inlined_entry_num --;
+      stats.inlined_total_entry_size -= entry.meta.size;
 
-    if (entry_already_inline){
       std::string inlined_index_key;
       encode_inlined_entry_key(entry.key, &inlined_index_key);
       rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
@@ -1257,7 +1208,48 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       }
     }
 
-  } // CLS_RGW_OP_ADD
+    if (op.op == CLS_RGW_OP_DEL) {
+      entry.meta = op.meta;
+      if (!ondisk) {
+        // no entry to erase
+        log_op = false;
+      } else if (!entry.pending_map.size()) {
+        rc = cls_cxx_map_remove_key(hctx, idx);
+        if (rc < 0) {
+          return rc;
+        }
+      } else {
+        entry.exists = false;
+        bufferlist new_key_bl;
+        encode(entry, new_key_bl);
+        rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+        if (rc < 0) {
+          return rc;
+        }
+      }
+    } // CLS_RGW_OP_DEL
+    else if (op.op == CLS_RGW_OP_ADD) {
+      rgw_bucket_dir_entry_meta& meta = op.meta;
+      entry.meta = meta;
+      entry.key = op.key;
+      entry.exists = true;
+      entry.tag = op.tag;
+      if (op.update_quota_stats){
+        rgw_bucket_category_stats& stats = header.stats[meta.category];
+        // account for new entry
+        stats.num_entries++;
+        stats.total_size += meta.accounted_size;
+        stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
+        stats.actual_size += meta.size;
+      }
+      bufferlist new_key_bl;
+      encode(entry, new_key_bl);
+      rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+      if (rc < 0) {
+        return rc;
+      }
+    } // CLS_RGW_OP_ADD
+  }
 
   if (log_op) {
     rc = log_index_operation(hctx, op.key, op.op, op.tag, entry.meta.mtime,
@@ -1322,6 +1314,22 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
   CLS_LOG(1, "rgw_bucket_complete_atomic_op(): op=%d, entry: name=%s, exists=%d inlined=%d",
           op.op, entry.key.name.c_str(), entry.exists, entry.meta.inline_head);
 
+  // record stale fragment in merge object, will be vacuumed by rgw background thread
+  if (!entry.meta.merge_obj_name.empty()){
+    header.merge_obj_stats.add_stale_frag(entry.meta.merge_obj_name, entry.meta.size);
+    std::string stale_frag_key;
+    encode_stale_frag_key(entry.meta.merge_obj_name, entry.meta.offset, &stale_frag_key);
+    rgw_merge_obj_stale_frag stale_frag;
+    stale_frag.offset = entry.meta.offset;
+    stale_frag.size = entry.meta.size;
+    bufferlist stale_frag_bl;
+    encode(stale_frag, stale_frag_bl);
+    rc = cls_cxx_map_set_val(hctx, stale_frag_key, &stale_frag_bl);
+    if (rc < 0) {
+      return rc;
+    }
+  }
+
   if (op.op == CLS_RGW_OP_ADD){
     if (op.update_quota_stats){
       if (entry.exists) {
@@ -1331,35 +1339,24 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
         stats.total_size -= entry.meta.accounted_size;
         stats.total_size_rounded -= cls_rgw_get_rounded_size(entry.meta.accounted_size);
         stats.actual_size -= entry.meta.size;
-
-        // update inlined entry stats
-        if(entry.meta.inline_head && entry.meta.merge_obj_name.empty()){
-          ceph_assert(stats.inlined_total_entry_size > 0);
-          ceph_assert(stats.inlined_entry_num > 0);
-          stats.inlined_entry_num --;
-          stats.inlined_total_entry_size -= entry.meta.size;
-        }
       }
     }
 
-    // record stale fragment in merge object, will be vacuumed by rgw background thread
-    if (!entry.meta.merge_obj_name.empty()){
-      header.merge_obj_stats.add_stale_frag(entry.meta.merge_obj_name, entry.meta.size);
-      std::string stale_frag_key;
-      encode_stale_frag_key(entry.meta.merge_obj_name, entry.meta.offset, &stale_frag_key);
-      rgw_merge_obj_stale_frag stale_frag;
-      stale_frag.offset = entry.meta.offset;
-      stale_frag.size = entry.meta.size;
-      bufferlist stale_frag_bl;
-      encode(stale_frag, stale_frag_bl);
-      rc = cls_cxx_map_set_val(hctx, stale_frag_key, &stale_frag_bl);
-      if (rc < 0) {
-        return rc;
-      }
+    // update inlined entry stats
+    if(entry.exists && entry.meta.inline_head && entry.meta.merge_obj_name.empty()){
+      rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+      stats.inlined_entry_num --;
+      stats.inlined_total_entry_size -= entry.meta.size;
+    }
+
+    bool may_have_stale_head = false;
+    if(entry.exists && !entry.meta.inline_head){
+      may_have_stale_head = true;
     }
 
     entry.key = op.key;
     entry.meta = op.meta;
+    entry.may_have_stale_head = may_have_stale_head;
     entry.meta.inline_index_epoch = cls_current_version(hctx);
     entry.locator = op.locator;
     entry.index_ver = header.ver;
@@ -1367,18 +1364,17 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     entry.tag = op.tag;
 
     rgw_bucket_dir_entry_meta& meta = op.meta;
+    rgw_bucket_category_stats& stats = header.stats[meta.category];
     if (op.update_quota_stats){
-      rgw_bucket_category_stats& stats = header.stats[meta.category];
       // account for new entry
       stats.num_entries++;
       stats.total_size += meta.accounted_size;
       stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
       stats.actual_size += meta.size;
-
-      // update inlined entry stats
-      stats.inlined_entry_num ++;
-      stats.inlined_total_entry_size += meta.size;
     }
+    // update inlined entry stats
+    stats.inlined_entry_num ++;
+    stats.inlined_total_entry_size += meta.size;
 
     bufferlist new_key_bl;
     encode(entry, new_key_bl);
@@ -1407,39 +1403,61 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
               __func__ , entry.key.name.c_str());
       return -ECANCELED;
     }
+    if (!entry.meta.inline_head){
+      CLS_LOG(20, " %s  del op race failed, entry %s was already overwritten by big obj !\n",
+              __func__ , entry.key.name.c_str());
+      return -ECANCELED;
+    }
+
+    if (entry.tag != op.tag){
+      CLS_LOG(20, " %s  del op race failed, entry %s was already overwritten by small obj!\n",
+              __func__ , entry.key.name.c_str());
+      return -ECANCELED;
+    }
+
     // unaccount deleted entry
     if (op.update_quota_stats){
       unaccount_entry(header, entry);
+    }
+
+    if(!entry.meta.merge_obj_name.empty()){
+      // data already merged to big obj,  remove this inlined entry
+      rc = cls_cxx_map_remove_key(hctx, idx);
+      if (rc < 0 ){
+        CLS_LOG(1, "WARNING: %s: entry key %s deletion failed", __func__, idx.c_str());
+        return rc;
+      }
+    }else {
+      // data still  inlined in this entry, create delete marker
       // update inlined entry stats
-      ceph_assert(header.stats[entry.meta.category].inlined_total_entry_size > 0);
       header.stats[entry.meta.category].inlined_total_entry_size -= entry.meta.size;
-    }
 
-    entry.meta = op.meta;
-    // logically delete inlined object,use this entry to cover the possibly existed head object
-    entry.meta.inline_head = true;
-    entry.exists = false;
-    entry.meta.inline_index_epoch = cls_current_version(hctx);
+      entry.meta = op.meta;
+      // logically delete inlined object,use this entry to cover the possibly existed head object
+      entry.meta.inline_head = true;
+      entry.exists = false;
+      entry.meta.inline_index_epoch = cls_current_version(hctx);
 
-    bufferlist new_key_bl;
-    encode(entry, new_key_bl);
-    rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
-    if (rc < 0) {
-      return rc;
-    }
+      bufferlist new_key_bl;
+      encode(entry, new_key_bl);
+      rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+      if (rc < 0) {
+        return rc;
+      }
 
-    // insert inlined entry index key, for fast list all inlined entries in this shard
-    std::string inlined_entry_key;
-    encode_inlined_entry_key(op.key, &inlined_entry_key);
+      // insert inlined entry index key, for fast list all inlined entries in this shard
+      std::string inlined_entry_key;
+      encode_inlined_entry_key(op.key, &inlined_entry_key);
 
-    rgw_bucket_inlined_entry_index index_val;
-    index_val.entry_size = entry.meta.size;
-    index_val.delete_marker = true;
-    bufferlist inlined_entry_idx_val;
-    encode(index_val, inlined_entry_idx_val);
-    rc = cls_cxx_map_set_val(hctx, inlined_entry_key, &inlined_entry_idx_val);
-    if (rc < 0) {
-      return rc;
+      rgw_bucket_inlined_entry_index index_val;
+      index_val.entry_size = entry.meta.size;
+      index_val.delete_marker = true;
+      bufferlist inlined_entry_idx_val;
+      encode(index_val, inlined_entry_idx_val);
+      rc = cls_cxx_map_set_val(hctx, inlined_entry_key, &inlined_entry_idx_val);
+      if (rc < 0) {
+        return rc;
+      }
     }
   } // CLS_RGW_OP_DEL
 
@@ -1576,20 +1594,17 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
         rgw_bucket_dir_entry real_entry;
         std::string real_idx;
         rc = read_key_entry(hctx, real_key, &real_idx, &real_entry);
-        if (rc < 0 && rc != -ENOENT) {
+        if (rc < 0) {
           CLS_LOG(1, "ERROR: %s: failed read real entry, key=%s",
                   __func__, real_idx.c_str());
+          return rc;
         }
-        if (rc == -ENOENT){
-          real_entry.key = real_key;
-          real_entry.exists = false;
-        }
-
+        ceph_assert(real_entry.meta.inline_head);
         name_entry_map[real_entry.key.name] = real_entry;
 
         prev_omap_key = kiter->first;
-        CLS_LOG(20, "%s: got object entry %s[%s] num entries=%d",
-                __func__, real_key.name.c_str(), real_key.instance.c_str(),
+        CLS_LOG(20, "%s: got object entry %s, exist: %d , curr num entries=%d",
+                __func__, real_key.name.c_str(), real_entry.exists,
                 int(name_entry_map.size()));
       }
     }
@@ -1686,7 +1701,7 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
      */
 
     if (rc == -ENOENT || !entry.meta.inline_head){
-      CLS_LOG(1, "WARNING: %s: entry %s didn't exist ", __func__, op_entry.key.to_string().c_str());
+      CLS_LOG(10, "WARNING: %s: entry %s didn't exist or not inlined ", __func__, op_entry.key.to_string().c_str());
       rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
       if (rc < 0 && rc != -ENOENT){
         CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
@@ -1729,6 +1744,7 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
         // tiny object payload data position
         entry.meta.merge_obj_name = op.merge_obj_name;
         entry.meta.offset = op_entry.offset;
+        entry.may_have_stale_head = false;
 
         bufferlist entry_bl;
         encode(entry, entry_bl);
@@ -1738,17 +1754,15 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
           return rc;
         }
       }else{
-        rc = cls_cxx_map_remove_key(hctx, entry_key); // todo inlined deletion marker should remove
+        rc = cls_cxx_map_remove_key(hctx, entry_key);
         if (rc < 0) {
           CLS_LOG(0, "ERROR: %s: cls_cxx_map_set_val() returned r=%d", __func__, rc);
           return rc;
         }
       }
 
-      ceph_assert(stats.inlined_entry_num > 0);
       stats.inlined_entry_num -= 1;
       if (entry.exists){
-        ceph_assert(stats.inlined_total_entry_size > 0);
         stats.inlined_total_entry_size -= entry.meta.size;
       }
 
@@ -1758,7 +1772,7 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
       }
 
     } else {
-      CLS_LOG(20, "WARNING: %s: inlined index key %s was overwritten", __func__, inlined_index_key.c_str());
+      CLS_LOG(10, "WARNING: %s: inlined index key %s was overwritten by other tiny obj ", __func__, inlined_index_key.c_str());
     }
   }
 

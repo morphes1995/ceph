@@ -4176,64 +4176,142 @@ static void clear_head_cb(completion_t cb, void *arg)
   delete completion;
 }
 
+int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent){
+  rgw::sal::RGWRadosStore *store = get_store();
+  rgw_obj obj(shardItem.bucket, dirent.key.name);
+  rgw_rados_ref ref;
+  int r = store->getRados()->get_obj_head_ref(dpp, shardItem.placement_rule, obj, &ref);
+  if (r < 0){
+    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get rgw_rados_ref failed obj :" << dirent.key.name << " r: " << r << dendl;
+    return r;
+  }
+  ref.obj.pool = ref.pool.get_pool();
+
+  // 1. read existed head state
+  bool exists = true;
+  RGWObjManifest manifest;
+  map<string, bufferlist> attrs;
+  uint64_t head_size;
+  r = store->getRados()->raw_obj_stat(dpp, ref.obj, &head_size, NULL, NULL, &attrs, NULL, NULL, null_yield);
+  if(r < 0 && r != -ENOENT){
+    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get obj state :" << dirent.key.name << " r: " << r << dendl;
+    return r;
+  }
+  if (r == -ENOENT){
+    exists = false;
+  }else{
+    bufferlist manifest_bl = attrs[RGW_ATTR_MANIFEST];
+    if (manifest_bl.length()) {
+      auto miter = manifest_bl.cbegin();
+      try {
+        decode(manifest, miter);
+        manifest.set_head(shardItem.placement_rule, obj, head_size);
+      } catch (buffer::error& err) {
+        ldpp_dout(dpp, 0) << "ERROR DC WorkerQ[" << thr_name() << "] couldn't decode head manifest" << dendl;
+        return -EIO;
+      }
+    }
+  }
+  if (!exists) {
+    return 0;
+  }
+
+  // 2. encapsulate del op
+  ObjectWriteOperation op;
+  //  try delete stale head
+  op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
+  // only delete head with index epoch less than us
+  op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
+  list<string> prefixes;
+  cls_rgw_remove_obj(op, prefixes);
+
+  auto& ioctx = ref.pool.ioctx();
+  r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, null_yield);
+  if (r < 0) {
+    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to delete back the head, obj :" << dirent.key.name << " r: " << r << dendl;
+    // we failed in race condition:  1) obj was modified, 2) obj was deleted
+    if (r == -ECANCELED || r == -ENOENT){
+      r = 0;
+      return r;
+    }
+  }
+
+  // 3. head deleted, gc tails here
+  cls_rgw_obj_chain chain;
+  store->getRados()->update_gc_chain(dpp, obj, manifest , &chain);
+  if (chain.empty()) {
+    return 0;
+  }
+  string tag = dirent.tag;
+  if (store->getRados()->get_gc() == nullptr) {
+    ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
+    //Delete objects inline just in case gc hasn't been initialised, prevents crashes
+    store->getRados()->delete_objs_inline(dpp, chain, tag);
+  } else {
+    auto [ret, leftover_chain] = store->getRados()->get_gc()->send_split_chain(chain, tag); // do it synchronously
+    if (ret < 0 && leftover_chain) {
+      //Delete objects inline if send chain to gc fails
+      store->getRados()->delete_objs_inline(dpp, *leftover_chain, tag);
+    }
+  }
+
+  return 0;
+}
+
 void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_name){
-  list<rgw_bucket_dir_entry> entries_to_detach;
-  list<rgw_bucket_inlined_entry> detached_entries;
+  list<rgw_bucket_dir_entry> entries_to_merge;
   for (auto &entry: entries) {
     rgw_bucket_dir_entry &dirent = entry.second;
-    if (!dirent.meta.inline_head){
-      rgw_bucket_inlined_entry d;
-      d.key = dirent.key;
-      d.tag = dirent.tag;
-      d.inline_index_epoch = dirent.meta.inline_index_epoch;
-      detached_entries.push_back(d);
-      continue;
+    ceph_assert(dirent.meta.inline_head);
+    if(dirent.may_have_stale_head){
+      int r = try_clear_stale_head(shardItem, dirent);
+      if(r < 0){
+        continue;
+      }
     }
-    entries_to_detach.push_back(entry.second);
+
+    entries_to_merge.push_back(entry.second);
   }
+  int r = 0;
+  uint32_t merged_obj_size = 0;
+  list<rgw_bucket_inlined_entry> entries_merged;
+  if(!entries_to_merge.empty()){
+    auto before_merge = ceph_clock_now();
+    r = _merge_heads_payload(shardItem, merge_obj_name, entries_to_merge, entries_merged, &merged_obj_size);
+    ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << "  merge heads data of bucket: " << shardItem.bucket.name
+                       << " shard:" << shardItem.oid << " obj cnt " << entries_to_merge.size() << " r:" << r <<dendl;
+    if (r < 0){
+      return;
+    }
+    auto after_merge = ceph_clock_now();
+    ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_merge.size()  << ", time taken: "<< (after_merge - before_merge) << dendl;
 
-  if(entries_to_detach.empty()){
-    return;
+    bool async_clear = wk->ctx()->_conf.get_val<bool>("rgw_async_clear_inlined_entry_head_data");
+    auto before_clear = ceph_clock_now();
+    librados::ObjectWriteOperation op;
+    string oid = shardItem.oid;
+    librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
+    cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
+    cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_merged, merge_obj_name, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
+    if(async_clear){
+      clear_op_data *entry = new clear_op_data();
+      entry->dpp = dpp;
+      AioCompletion *c = librados::Rados::aio_create_completion(entry, clear_head_cb);
+      r = ioctx.aio_operate(oid, c, &op);
+    }else{
+      r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
+    }
+
+    if (r < 0)
+      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] clear entries inlined data : " << shardItem.bucket.name
+                        << " shard:" << shardItem.oid << " r: " << r << dendl;
+    auto after_clear = ceph_clock_now();
+    ldpp_dout(dpp, 20) << "cls_rgw_bucket_clear_inlined_entry_data_op items" << entries_merged.size() << " time taken: "<< (after_clear - before_clear) << dendl;
   }
-
-  auto before_merge = ceph_clock_now();
-  uint32_t merged_obj_size;
-  list<rgw_bucket_inlined_entry> entries_detached;
-  int r = _merge_heads_payload(shardItem, merge_obj_name, entries_to_detach, entries_detached, &merged_obj_size);
-  ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << "  merge heads data of bucket: " << shardItem.bucket.name
-                     << " shard:" << shardItem.oid << " obj cnt " << entries_to_detach.size() << " r:" << r <<dendl;
-  if (r < 0){
-    return;
-  }
-
-  auto after_merge = ceph_clock_now();
-  ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_detach.size()  << ", time taken: "<< (after_merge - before_merge) << dendl;
-
-  bool async_clear = wk->ctx()->_conf.get_val<bool>("rgw_async_clear_inlined_entry_head_data");
-  auto before_clear = ceph_clock_now();
-  librados::ObjectWriteOperation op;
-  string oid = shardItem.oid;
-  librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
-  cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
-  cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_detached, merge_obj_name, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
-  if(async_clear){
-    clear_op_data *entry = new clear_op_data();
-    entry->dpp = dpp;
-    AioCompletion *c = librados::Rados::aio_create_completion(entry, clear_head_cb);
-    r = ioctx.aio_operate(oid, c, &op);
-  }else{
-    r = rgw_rados_operate(dpp, ioctx, oid, &op, null_yield);
-  }
-
-  if (r < 0)
-    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] clear entries inlined data : " << shardItem.bucket.name
-                      << " shard:" << shardItem.oid << " r: " << r << dendl;
-  auto after_clear = ceph_clock_now();
-  ldpp_dout(dpp, 20) << "cls_rgw_bucket_clear_inlined_entry_data_op items" << entries_detached.size() << " time taken: "<< (after_clear - before_clear) << dendl;
 }
 
 int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
-                                  list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_detached, uint32_t *merged_obj_size){
+                                  list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, uint32_t *merged_obj_size){
   bufferlist merged_bl;
   for(auto entry: entries_to_detach){
     int offset = merged_bl.length();
@@ -4244,7 +4322,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
     d.tag = entry.tag;
     d.inline_index_epoch = entry.meta.inline_index_epoch;
     d.offset = offset;
-    entries_detached.emplace_back(d);
+    entries_merged.emplace_back(d);
   }
 
   rgw::sal::RGWRadosStore *store = get_store();
@@ -4289,7 +4367,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
     // keep tiny objects offset info in omap
     rgw_object_offsets_info offsets_info;
     bufferlist offsets_bl;
-    for(auto &entry: entries_detached){
+    for(auto &entry: entries_merged){
       offsets_info.offsets.emplace_back(rgw_object_offset(size + entry.offset, entry.key.name));
     }
     encode(offsets_info, offsets_bl);
@@ -4304,7 +4382,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
 
   }while( r == -ECANCELED || r == -EEXIST); // retry when race failed
 
-  for(auto &entry: entries_detached){
+  for(auto &entry: entries_merged){
     entry.offset += size; // update offset
     ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] obj " <<entry.key.name << " merged to " << ref.obj.oid << " offset: " << entry.offset << dendl;
   }
@@ -6231,8 +6309,7 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
     params.bilog_flags |= RGW_BILOG_FLAG_FORCE_DEL_OP;
   }
   index_op.set_bilog_flags(params.bilog_flags);
-  append_rand_alpha(target->get_store()->ctx(), state->write_tag, state->write_tag, 32);
-  index_op.set_op_tag(state->write_tag);
+  index_op.set_op_tag(state->obj_tag.c_str());
 
   r = index_op.complete_atomic_del(dpp, state->mtime, params.remove_objs, update_quota_stats);
 

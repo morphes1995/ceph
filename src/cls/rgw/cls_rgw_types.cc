@@ -226,6 +226,7 @@ void rgw_bucket_dir_entry::dump(Formatter *f) const
   encode_json("flags", (int)flags , f);
   encode_json("pending_map", pending_map, f);
   encode_json("versioned_epoch", versioned_epoch , f);
+  encode_json("may_have_stale_head", may_have_stale_head , f);
 }
 
 void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
@@ -241,6 +242,7 @@ void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
   flags = (uint16_t)val;
   JSONDecoder::decode_json("pending_map", pending_map, obj);
   JSONDecoder::decode_json("versioned_epoch", versioned_epoch, obj);
+  JSONDecoder::decode_json("may_have_stale_head", may_have_stale_head, obj);
 }
 
 void rgw_bucket_inlined_entry_index::dump(Formatter *f) const
@@ -257,11 +259,13 @@ void rgw_bucket_inlined_entry_index::decode_json(JSONObj *obj) {
 void rgw_merge_obj_stale_frag::dump(Formatter *f) const{
   encode_json("offset", offset , f);
   encode_json("size", size , f);
+  encode_json("rgw_obj_name", rgw_obj_name , f);
 }
 
 void rgw_merge_obj_stale_frag::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("offset", offset , obj);
   JSONDecoder::decode_json("size", size , obj);
+  JSONDecoder::decode_json("rgw_obj_name", rgw_obj_name , obj);
 }
 
 static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *formatter)
