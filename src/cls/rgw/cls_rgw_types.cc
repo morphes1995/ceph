@@ -259,13 +259,13 @@ void rgw_bucket_inlined_entry_index::decode_json(JSONObj *obj) {
 void rgw_merge_obj_stale_frag::dump(Formatter *f) const{
   encode_json("offset", offset , f);
   encode_json("size", size , f);
-  encode_json("rgw_obj_name", rgw_obj_name , f);
+  encode_json("merge_obj_name", merge_obj_name , f);
 }
 
 void rgw_merge_obj_stale_frag::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("offset", offset , obj);
   JSONDecoder::decode_json("size", size , obj);
-  JSONDecoder::decode_json("rgw_obj_name", rgw_obj_name , obj);
+  JSONDecoder::decode_json("merge_obj_name", merge_obj_name , obj);
 }
 
 static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *formatter)
@@ -740,6 +740,7 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
 }
 
 void rgw_merge_object_stat::dump(Formatter *f) const {
+  f->dump_int("version", version);
   f->dump_int("size", size);
   f->dump_int("size_to_release", size_to_release);
   f->dump_bool("writing", writing);

@@ -74,8 +74,11 @@ constexpr int RGWBIAdvanceAndRetryError = -EFBIG;
 
 /* inlined bucket list */
 #define RGW_INLINE_SET_ENTRY "inline_set_entry"
+#define RGW_INLINE_SET_ENTRY_VACUUMING "inline_set_entry_vacuuming"
 #define RGW_INLINE_RM_ENTRY "inline_rm_entry"
 #define RGW_INLINED_BUCKETS_LIST "inlined_buckets_list"
+#define RGW_LIST_STALE_FRAGS "list_stale_frags"
+#define RGW_FINISH_VACUUM "finish_vacuum"
 
 /* resharding */
 #define RGW_RESHARD_ADD "reshard_add"

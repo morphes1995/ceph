@@ -341,6 +341,7 @@ void rgw_bucket_inlined_entry::dump(Formatter *f) const {
   encode_json("tag", tag, f);
   encode_json("inline_index_epoch", inline_index_epoch, f);
   encode_json("offset", offset, f);
+  encode_json("size", size, f);
 }
 
 void rgw_cls_clear_inlined_data_op::dump(Formatter *f) const

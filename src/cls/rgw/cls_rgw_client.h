@@ -365,6 +365,9 @@ void cls_rgw_obj_check_mtime_bi(librados::ObjectOperation& o, cls_rgw_obj_key &k
 int cls_rgw_bi_get(librados::IoCtx& io_ctx, const std::string oid,
                    BIIndexType index_type, cls_rgw_obj_key& key,
                    rgw_cls_bi_entry *entry);
+int cls_list_stale_frags(librados::IoCtx& io_ctx, const string oid, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags);
+int cls_obj_finish_vacuum(librados::IoCtx& io_ctx, const string oid, string &src_merge_obj_name, string &dest_merge_obj_name,
+                          rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info);
 void cls_rgw_bi_get_obj_stat_op(librados::ObjectReadOperation& op,
                                BIIndexType index_type, cls_rgw_obj_key& key,
                                bool prefetch_data, std::list<obj_version_cond> &conds, rgw_cls_bi_get_ret *result);
@@ -639,6 +642,7 @@ int cls_rgw_lc_list(librados::IoCtx& io_ctx, const std::string& oid,
 #endif
 
 int cls_rgw_inline_set_entry(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id, bool disabling);
+int cls_rgw_inline_set_entry_vacuuming(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id, uint64_t rgw_vacuum_process_period_sec);
 int cls_rgw_inline_rm_entry(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id);
 int cls_rgw_inlined_bucket_list(librados::IoCtx& io_ctx, const string& oid, vector<string>& buckets, bool only_disabling);
 

@@ -496,6 +496,41 @@ int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
   return 0;
 }
 
+int cls_list_stale_frags(librados::IoCtx& io_ctx, const string oid, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags)
+{
+  bufferlist in, out;
+  rgw_cls_list_stale_frags_op call;
+  call.merge_obj_name = merge_obj_name;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_LIST_STALE_FRAGS, in, out);
+  if (r < 0)
+    return r;
+
+  rgw_cls_list_stale_frags_ret op_ret;
+  auto iter = out.cbegin();
+  try {
+    decode(op_ret, iter);
+  } catch (ceph::buffer::error& err) {
+    return -EIO;
+  }
+  frags.swap(op_ret.frags);
+
+  return 0;
+}
+
+int cls_obj_finish_vacuum(librados::IoCtx& io_ctx, const string oid, string &src_merge_obj_name, string &dest_merge_obj_name,
+                          rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info)
+{
+  bufferlist in, out;
+  rgw_cls_finish_vacuum_op call;
+  call.src_merge_obj_name =src_merge_obj_name;
+  call.dest_merge_obj_name = dest_merge_obj_name;
+  call.new_merge_obj = dest_merge_obj;
+  call.new_offsets_info = new_offsets_info;
+  encode(call, in);
+  return io_ctx.exec(oid, RGW_CLASS, RGW_FINISH_VACUUM, in, out);
+}
+
 /*
  * This class represents the get object state from bucket index entry operation callback context.
  */
@@ -1193,6 +1228,17 @@ int cls_rgw_inline_set_entry(IoCtx& io_ctx, const string& oid, const string& buc
   call.disabling = disabling;
   encode(call, in);
   int r = io_ctx.exec(oid, RGW_CLASS, RGW_INLINE_SET_ENTRY, in, out);
+  return r;
+}
+
+int cls_rgw_inline_set_entry_vacuuming(IoCtx& io_ctx, const string& oid, const string& bucket_id, uint64_t rgw_vacuum_process_period_sec)
+{
+  bufferlist in, out;
+  cls_rgw_inline_entry_set_vacuuming_op call;
+  call.bucket_id = bucket_id;
+  call.rgw_vacuum_process_period_sec = rgw_vacuum_process_period_sec;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_INLINE_SET_ENTRY_VACUUMING, in, out);
   return r;
 }
 

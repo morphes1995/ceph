@@ -693,8 +693,6 @@ public:
     class DisableThread : public Thread {
         CephContext *cct;
         RGWRadosDetacher *dc;
-        ceph::mutex lock = ceph::make_mutex("RGWRadosDetacher::DisableThread");
-        ceph::condition_variable cond;
     public:
 
         DisableThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
@@ -724,6 +722,56 @@ public:
     };
     DisableThread *disable_thread;
 
+    /* thread periodically purge the stale fragments in big merge object */
+    class VacuumThread : public Thread {
+        CephContext *cct;
+        RGWRadosDetacher *dc;
+        ceph::mutex lock = ceph::make_mutex("RGWRadosDetacher::VacuumThread");
+        ceph::condition_variable cond;
+    public:
+        VacuumThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
+
+        void *entry() override {
+          do {
+            int secs = cct->_conf->rgw_vacuum_process_period_sec;
+            std::unique_lock locker{lock};
+            cond.wait_for(locker, std::chrono::seconds(secs));
+
+            utime_t start = ceph_clock_now();
+            ldout(cct, 2) << "VacuumThread: start" << dendl;
+            vector<string> inlined_buckets;
+            int r =dc->list_entry(inlined_buckets, false);
+            if(r < 0 && r != -ENOENT){
+              ldout(cct, 1) << "ERROR: VacuumThread list bucket entry error " << " r:"<< r << dendl;
+              continue;
+            }
+
+            for(auto bucket_id: inlined_buckets){
+              r =dc->set_entry_vacuuming(bucket_id, secs);
+              if(r < 0){
+                ldout(cct, 1) << "ERROR: VacuumThread set bucket entry vacuuming error " << " r:"<< r << dendl;
+                continue;
+              }
+              r = dc->vacuum_bucket(bucket_id, start);
+              if(r < 0){
+                ldout(cct, 0) << "Warning: VacuumThread vacuum_bucket() returned error r=" << r << dendl;
+                break;
+              }
+            }
+
+            if (dc->going_down())
+              break;
+          } while (!dc->going_down());
+
+          return NULL;
+        }
+        void stop() {
+          std::lock_guard l{lock};
+          cond.notify_all();
+        }
+    };
+    VacuumThread *vacuum_thread;
+
     std::vector<std::unique_ptr<DCWorker>> workers;
 
     RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGWRadosStore *_store, bool use_detacher);
@@ -732,8 +780,12 @@ public:
     void swap_modified_buckets(map<rgw_bucket, rgw_placement_rule>& out);
     int detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule, std::string &rgw_instance);
     void try_disable_object_inline(string &bucket_id);
+    int vacuum_bucket(string &bucket_id, utime_t &start);
+    void vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj);
+    void remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint16_t shard_id, string &src_merge_obj_name);
 
     int set_entry(rgw_bucket &bucket, bool disabling);
+    int set_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec);
     int rm_entry(rgw_bucket &bucket);
     int list_entry(vector<string>& buckets, bool only_disabling);
 
@@ -765,6 +817,7 @@ private:
         std::unique_lock lock{mutex};
         stop_thread(&detach_thread);
         stop_thread(&disable_thread);
+        stop_thread(&vacuum_thread);
       }
     }
 };
@@ -1955,6 +2008,10 @@ public:
   int bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_olh(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_olh_entry *olh);
   int bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, BIIndexType index_type, rgw_cls_bi_entry *entry);
+  int list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+                                 int shard_id, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags);
+  int finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+                              int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name, rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info);
   void bi_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry);

@@ -490,6 +490,7 @@ struct rgw_bucket_inlined_entry {
     std::string tag;
     uint64_t inline_index_epoch;
     uint32_t offset;
+    uint32_t size;
 
     rgw_bucket_inlined_entry() : inline_index_epoch(0) {}
 
@@ -499,6 +500,7 @@ struct rgw_bucket_inlined_entry {
         encode(tag, bl);
         encode(inline_index_epoch, bl);
         encode(offset, bl);
+        encode(size, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
@@ -507,6 +509,7 @@ struct rgw_bucket_inlined_entry {
         decode(tag, bl);
         decode(inline_index_epoch, bl);
         decode(offset, bl);
+        decode(size, bl);
       DECODE_FINISH(bl);
     }
 
@@ -744,6 +747,69 @@ struct rgw_cls_bi_get_ret {
   }
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_get_ret)
+
+struct rgw_cls_list_stale_frags_op {
+    string merge_obj_name;
+    rgw_cls_list_stale_frags_op() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(merge_obj_name, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(merge_obj_name, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_list_stale_frags_op)
+
+struct rgw_cls_list_stale_frags_ret {
+    map<uint32_t, rgw_merge_obj_stale_frag> frags;
+    rgw_cls_list_stale_frags_ret() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(frags, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(frags, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_list_stale_frags_ret)
+
+struct rgw_cls_finish_vacuum_op {
+    string src_merge_obj_name;
+    string dest_merge_obj_name;
+    rgw_merge_object_stat new_merge_obj;
+    rgw_object_offsets_info new_offsets_info;
+    rgw_cls_finish_vacuum_op() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(src_merge_obj_name, bl);
+        encode(dest_merge_obj_name, bl);
+        encode(new_merge_obj, bl);
+        encode(new_offsets_info, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(src_merge_obj_name, bl);
+        decode(dest_merge_obj_name, bl);
+        decode(new_merge_obj, bl);
+        decode(new_offsets_info, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_finish_vacuum_op)
 
 struct rgw_cls_bi_get_obj_stat_op {
   cls_rgw_obj_key key;
@@ -1411,12 +1477,16 @@ WRITE_CLASS_ENCODER(cls_rgw_lc_list_entries_ret)
 struct cls_rgw_inline_entry_op {
     string bucket_id;
     bool disabling;
+    bool vacuuming;
+    uint64_t  vacuuming_start_time;
     cls_rgw_inline_entry_op() {}
 
     void encode(ceph::buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
       encode(bucket_id, bl);
       encode(disabling, bl);
+      encode(vacuuming, bl);
+      encode(vacuuming_start_time, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -1424,6 +1494,8 @@ struct cls_rgw_inline_entry_op {
       DECODE_START(1, bl);
       decode(bucket_id, bl);
       decode(disabling, bl);
+      decode(vacuuming, bl);
+      decode(vacuuming_start_time, bl);
       DECODE_FINISH(bl);
     }
 };
@@ -1462,6 +1534,27 @@ struct cls_rgw_inlined_buckets_list_ret {
     }
 };
 WRITE_CLASS_ENCODER(cls_rgw_inlined_buckets_list_ret)
+
+struct cls_rgw_inline_entry_set_vacuuming_op {
+    string bucket_id;
+    uint64_t rgw_vacuum_process_period_sec;
+    cls_rgw_inline_entry_set_vacuuming_op() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(bucket_id, bl);
+        encode(rgw_vacuum_process_period_sec, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(bucket_id, bl);
+        decode(rgw_vacuum_process_period_sec, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(cls_rgw_inline_entry_set_vacuuming_op)
 
 struct cls_rgw_reshard_add_op {
  cls_rgw_reshard_entry entry;

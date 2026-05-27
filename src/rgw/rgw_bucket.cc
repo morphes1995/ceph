@@ -1627,7 +1627,7 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
       total_merge_obj_stale_frags_size += iter.second.size_to_release;
     }
   }
-  formatter->dump_int("total_merge_obj_stale_frags_size_mb", total_merge_obj_stale_frags_size >> 10 >> 10);
+  formatter->dump_int("total_merge_obj_stale_frags_size", total_merge_obj_stale_frags_size);
   if(fetch_stale_frags_stat){
     merge_objects_stale_frags.dump(formatter);
   }

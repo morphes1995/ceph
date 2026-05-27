@@ -6095,6 +6095,15 @@ std::vector<Option> get_rgw_options() {
             .set_long_description("when tiny rgw object payload data merged to big rados object, the max size of big rados object, must smaller than osd_max_object_size")
             .add_see_also("osd_max_object_size"),
 
+    Option("rgw_vacuum_process_period_sec", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
+            .set_default(3600)
+            .set_description("rgw vacuum thread cycle run time")
+            .set_long_description("rgw vacuum thread cycle run time"),
+    Option("rgw_vacuum_threshold_pct", Option::TYPE_FLOAT, Option::LEVEL_ADVANCED)
+            .set_default(0.3)
+            .set_min_max(0.0, 1.0)
+            .set_description("stale data percent threshold to force the vacuum"),
+
    Option("rgw_async_clear_inlined_entry_head_data", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
            .set_default(true)
            .set_description("when tiny object merged to big rados object, clear inlined entry head data asynchronously")
