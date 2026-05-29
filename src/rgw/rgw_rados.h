@@ -749,7 +749,7 @@ public:
             for(auto bucket_id: inlined_buckets){
               r =dc->set_entry_vacuuming(bucket_id, secs);
               if(r < 0){
-                ldout(cct, 1) << "ERROR: VacuumThread set bucket entry vacuuming error " << " r:"<< r << dendl;
+                ldout(cct, 10) << "WARNING: VacuumThread set bucket entry vacuuming failed " << " r:"<< r << dendl;
                 continue;
               }
               r = dc->vacuum_bucket(bucket_id, start);

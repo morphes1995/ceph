@@ -4823,8 +4823,8 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
 
   ceph_assert(dest_merge_obj_size + total_frags_size == src_merge_obj.size);
 
-  // 6. update merge object name and offset in corresponding object bucket index entry
-  // 7. update shard head stats
+  // 6. update shard head merge object stats
+  // 7. update merge object name and offset in corresponding object bucket index entry
   // 8. remove stale fragments entries
   rgw_merge_object_stat dest_merge_obj;
   dest_merge_obj.size = dest_merge_obj_size;

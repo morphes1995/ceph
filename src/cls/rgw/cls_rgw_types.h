@@ -208,7 +208,8 @@ struct rgw_bucket_dir_entry_meta {
   uint32_t offset;
 
   rgw_bucket_dir_entry_meta() :
-    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false), inline_head(false), head_data_size(0), inline_index_epoch(0) { }
+    category(RGWObjCategory::None), size(0), accounted_size(0), appendable(false), inline_head(false), head_data_size(0), inline_index_epoch(0),
+    merge_obj_name(""), offset(0) { }
 
   void encode(ceph::buffer::list &bl) const {
     ENCODE_START(8, 3, bl);

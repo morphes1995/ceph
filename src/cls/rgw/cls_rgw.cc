@@ -1126,7 +1126,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   if (op.tag.size()) {
     auto pinter = entry.pending_map.find(op.tag);
     if (pinter == entry.pending_map.end()) {
-      CLS_LOG(1, "ERROR: couldn't find tag for pending operation\n");
+      CLS_LOG(1, "ERROR: couldn't find tag for pending operation, key: %s\n", entry.key.name.c_str());
       return -EINVAL;
     }
     pending_index_epoch = pinter->second.pending_index_epoch;
@@ -1423,10 +1423,21 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
 
     if(!entry.meta.merge_obj_name.empty()){
       // data already merged to big obj,  remove this inlined entry
-      rc = cls_cxx_map_remove_key(hctx, idx);
-      if (rc < 0 ){
-        CLS_LOG(1, "WARNING: %s: entry key %s deletion failed", __func__, idx.c_str());
-        return rc;
+      if (entry.pending_map.empty()) {
+        rc = cls_cxx_map_remove_key(hctx, idx);
+        if (rc < 0) {
+          CLS_LOG(1, "WARNING: %s: entry key %s deletion failed", __func__, idx.c_str());
+          return rc;
+        }
+      } else {
+        entry.exists = false;
+        entry.meta = op.meta;
+        bufferlist new_key_bl;
+        encode(entry, new_key_bl);
+        rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+        if (rc < 0) {
+          return rc;
+        }
       }
     }else {
       // data still  inlined in this entry, create delete marker
@@ -1756,10 +1767,22 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
           return rc;
         }
       }else{
-        rc = cls_cxx_map_remove_key(hctx, entry_key);
-        if (rc < 0) {
-          CLS_LOG(0, "ERROR: %s: cls_cxx_map_set_val() returned r=%d", __func__, rc);
-          return rc;
+        if (entry.pending_map.empty()) {
+          rc = cls_cxx_map_remove_key(hctx, entry_key);
+          if (rc < 0) {
+            CLS_LOG(1, "WARNING: %s: entry key %s deletion failed", __func__, entry_key.c_str());
+            return rc;
+          }
+        } else {
+          entry.exists = false;
+          entry.meta.inline_head = false;
+          entry.meta.inline_index_epoch =0;
+          bufferlist new_key_bl;
+          encode(entry, new_key_bl);
+          rc = cls_cxx_map_set_val(hctx, entry_key, &new_key_bl);
+          if (rc < 0) {
+            return rc;
+          }
         }
       }
 
@@ -5338,8 +5361,8 @@ static int rgw_list_stale_frags(cls_method_context_t hctx, bufferlist *in,
 }
 
 /**
- * 1. update merge object name and offset in corresponding object bucket index entry
- * 2. update shard head stats
+ * 1. update shard head merge object stats
+ * 2. update merge object name and offset in corresponding object bucket index entry
  * 3. remove stale fragments entries
  */
 static int rgw_cls_finish_vacuum(cls_method_context_t hctx, bufferlist *in,
@@ -5372,6 +5395,9 @@ static int rgw_cls_finish_vacuum(cls_method_context_t hctx, bufferlist *in,
   }
 
   // 1.
+  header.merge_obj_stats.set_merge_obj(op.dest_merge_obj_name, op.new_merge_obj);
+
+  // 2.
   for(auto &off: op.new_offsets_info.offsets){
     std::string obj_idx;
     cls_rgw_obj_key key;
@@ -5406,9 +5432,6 @@ static int rgw_cls_finish_vacuum(cls_method_context_t hctx, bufferlist *in,
       return rc;
     }
   }
-
-  // 2.
-  header.merge_obj_stats.set_merge_obj(op.dest_merge_obj_name, op.new_merge_obj);
 
   // 3.
 stale_frags_range_rm:
