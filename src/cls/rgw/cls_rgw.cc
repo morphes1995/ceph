@@ -1202,15 +1202,16 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     }
 
     if (entry_already_inline && entry.meta.merge_obj_name.empty()){
-      rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
-      stats.inlined_entry_num --;
-      stats.inlined_total_entry_size -= entry.meta.size;
-
       std::string inlined_index_key;
       encode_inlined_entry_key(entry.key, &inlined_index_key);
       rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
       if (rc < 0 && rc != -ENOENT){
         CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
+      }
+      rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
+      stats.inlined_entry_num --;
+      if(entry.exists){
+        stats.inlined_total_entry_size -= entry.meta.size;
       }
     }
 
@@ -1341,10 +1342,12 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     }
 
     // update inlined entry stats
-    if(entry.exists && entry.meta.inline_head && entry.meta.merge_obj_name.empty()){
-      rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+    if(entry.meta.inline_head && entry.meta.merge_obj_name.empty()){
+      rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
       stats.inlined_entry_num --;
-      stats.inlined_total_entry_size -= entry.meta.size;
+      if(entry.exists){
+        stats.inlined_total_entry_size -= entry.meta.size;
+      }
     }
 
     bool may_have_stale_head = entry.may_have_stale_head;

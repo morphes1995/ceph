@@ -4228,12 +4228,13 @@ int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &di
   auto& ioctx = ref.pool.ioctx();
   r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, null_yield);
   if (r < 0) {
-    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to delete back the head, obj :" << dirent.key.name << " r: " << r << dendl;
     // we failed in race condition:  1) obj was modified, 2) obj was deleted
     if (r == -ECANCELED || r == -ENOENT){
       r = 0;
-      return r;
+    }else{
+      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to clear the stale head, obj :" << dirent.key.name << " r: " << r << dendl;
     }
+    return r;
   }
 
   // 3. head deleted, gc tails here
