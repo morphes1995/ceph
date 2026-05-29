@@ -1144,9 +1144,10 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   if (op.op != CLS_RGW_OP_CANCEL && op.tag.size()){
     if(entry_already_inline && entry.meta.inline_index_epoch > pending_index_epoch){
       // inline head data writes to this entry after prepare op , we can not complete this entry, cancel this op and keep inlined entry latest
-      CLS_LOG(5, "rgw_bucket_complete_op(): skipping request, op: %d, we can not overwrite the inlined entry: "
-                 " inline_index_epoch: %ld, pending_index_epoch: %ld \n", op.op, entry.meta.inline_index_epoch, pending_index_epoch);
+      CLS_LOG(10, "rgw_bucket_complete_op(): skipping request, op: %d, we can not overwrite the inlined entry: "
+                 " inline_index_epoch: %ld, pending_index_epoch: %ld , key: %s \n", op.op, entry.meta.inline_index_epoch, pending_index_epoch, op.key.name.c_str());
       op.op = CLS_RGW_OP_CANCEL;
+      entry.may_have_stale_head = true;
     }
   }
 
@@ -1346,14 +1347,14 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
       stats.inlined_total_entry_size -= entry.meta.size;
     }
 
-    bool may_have_stale_head = false;
+    bool may_have_stale_head = entry.may_have_stale_head;
     if(entry.exists && !entry.meta.inline_head){
       may_have_stale_head = true;
     }
+    entry.may_have_stale_head = may_have_stale_head;
 
     entry.key = op.key;
     entry.meta = op.meta;
-    entry.may_have_stale_head = may_have_stale_head;
     entry.meta.inline_index_epoch = cls_current_version(hctx);
     entry.locator = op.locator;
     entry.index_ver = header.ver;
@@ -1597,6 +1598,11 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
           return rc;
         }
         ceph_assert(real_entry.meta.inline_head);
+
+        if(!real_entry.pending_map.empty()){
+            continue;
+        }
+
         name_entry_map[real_entry.key.name] = real_entry;
 
         prev_omap_key = kiter->first;
