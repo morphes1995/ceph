@@ -3219,7 +3219,8 @@ int RGWRados::Object::Write::_do_write_meta(const DoutPrefixProvider *dpp,
   }
 
   bufferlist bl;
-  encode(index_op->get_epoch(), bl);
+  string epoch_s = to_string(index_op->get_epoch());
+  bl.append(epoch_s.c_str(), epoch_s.size());
   op.setxattr(RGW_ATTR_INDEX_POOL_EPOCH, bl); // set index pool epoch in head attr
 
   auto& ioctx = ref.pool.ioctx();
@@ -3893,13 +3894,8 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
       map<string, bufferlist>::iterator aiter = result_from_head.unfiltered_attrset.find(RGW_ATTR_INDEX_POOL_EPOCH);
       if (aiter != result_from_head.unfiltered_attrset.end()) {
         bufferlist& epoch_bl = aiter->second;
-        auto bl = epoch_bl.cbegin();
-        try {
-          decode(epoch_in_head, bl);
-        } catch (buffer::error& err) {
-          ldpp_dout(dpp, 0) << "ERROR: couldn't decode head epoch attr for object " << head_oid  << dendl;
-          return -EIO;
-        }
+        string epoch_str(epoch_bl.c_str(), epoch_bl.length());
+        epoch_in_head = strtoull(epoch_str.c_str(), NULL, 10);
       }
 
       if(dirent.meta.inline_index_epoch > epoch_in_head){
@@ -4187,76 +4183,91 @@ int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &di
   }
   ref.obj.pool = ref.pool.get_pool();
 
-  // 1. read existed head state
-  bool exists = true;
-  RGWObjManifest manifest;
-  map<string, bufferlist> attrs;
-  uint64_t head_size;
-  r = store->getRados()->raw_obj_stat(dpp, ref.obj, &head_size, NULL, NULL, &attrs, NULL, NULL, null_yield);
-  if(r < 0 && r != -ENOENT){
-    ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get obj state :" << dirent.key.name << " r: " << r << dendl;
-    return r;
-  }
-  if (r == -ENOENT){
-    exists = false;
-  }else{
-    bufferlist manifest_bl = attrs[RGW_ATTR_MANIFEST];
-    if (manifest_bl.length()) {
-      auto miter = manifest_bl.cbegin();
-      try {
-        decode(manifest, miter);
-        manifest.set_head(shardItem.placement_rule, obj, head_size);
-      } catch (buffer::error& err) {
-        ldpp_dout(dpp, 0) << "ERROR DC WorkerQ[" << thr_name() << "] couldn't decode head manifest" << dendl;
-        return -EIO;
+  do{
+    // 1. read existed head state
+    bool exists = true;
+    RGWObjManifest manifest;
+    uint64_t inline_index_epoch = 0;
+    map<string, bufferlist> attrs;
+    uint64_t head_size;
+    r = store->getRados()->raw_obj_stat(dpp, ref.obj, &head_size, NULL, NULL, &attrs, NULL, NULL, null_yield);
+    if(r < 0 && r != -ENOENT){
+      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get obj state :" << dirent.key.name << " r: " << r << dendl;
+      return r;
+    }
+    if (r == -ENOENT){
+      exists = false;
+    }else{
+      bufferlist manifest_bl = attrs[RGW_ATTR_MANIFEST];
+      if (manifest_bl.length()) {
+        auto miter = manifest_bl.cbegin();
+        try {
+          decode(manifest, miter);
+          manifest.set_head(shardItem.placement_rule, obj, head_size);
+        } catch (buffer::error& err) {
+          ldpp_dout(dpp, 0) << "ERROR DC WorkerQ[" << thr_name() << "] couldn't decode head manifest" << dendl;
+          return -EIO;
+        }
+      }
+      auto i = attrs.find(RGW_ATTR_INDEX_POOL_EPOCH);
+      if (i != attrs.end() && i->second.length() > 0) {
+        string epoch_str(i->second.c_str(), i->second.length());
+        inline_index_epoch = strtoull(epoch_str.c_str(), NULL, 10);
       }
     }
-  }
-  if (!exists) {
-    return 0;
-  }
-
-  // 2. encapsulate del op
-  ObjectWriteOperation op;
-  //  try delete stale head
-  op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
-  // only delete head with index epoch less than us
-  op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
-  list<string> prefixes;
-  cls_rgw_remove_obj(op, prefixes);
-
-  auto& ioctx = ref.pool.ioctx();
-  r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, null_yield);
-  if (r < 0) {
-    // we failed in race condition:  1) obj was modified, 2) obj was deleted
-    if (r == -ECANCELED || r == -ENOENT){
-      r = 0;
-    }else{
-      ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to clear the stale head, obj :" << dirent.key.name << " r: " << r << dendl;
+    if (!exists) {
+      return 0;
     }
-    return r;
-  }
-
-  // 3. head deleted, gc tails here
-  cls_rgw_obj_chain chain;
-  store->getRados()->update_gc_chain(dpp, obj, manifest , &chain);
-  if (chain.empty()) {
-    return 0;
-  }
-  string tag = dirent.tag;
-  if (store->getRados()->get_gc() == nullptr) {
-    ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
-    //Delete objects inline just in case gc hasn't been initialised, prevents crashes
-    store->getRados()->delete_objs_inline(dpp, chain, tag);
-  } else {
-    auto [ret, leftover_chain] = store->getRados()->get_gc()->send_split_chain(chain, tag); // do it synchronously
-    if (ret < 0 && leftover_chain) {
-      //Delete objects inline if send chain to gc fails
-      store->getRados()->delete_objs_inline(dpp, *leftover_chain, tag);
+    if(inline_index_epoch > dirent.meta.inline_index_epoch){
+      return 0;
     }
-  }
 
-  return 0;
+    // 2. encapsulate del op
+    ObjectWriteOperation op;
+    //  try delete stale head
+    op.cmpxattr(RGW_ATTR_ID_TAG, LIBRADOS_CMPXATTR_OP_EQ, attrs[RGW_ATTR_ID_TAG]);
+    // only delete head with index epoch less than us
+    op.cmpxattr(RGW_ATTR_INDEX_POOL_EPOCH, LIBRADOS_CMPXATTR_OP_GT, dirent.meta.inline_index_epoch);
+    list<string> prefixes;
+    cls_rgw_remove_obj(op, prefixes);
+
+    auto& ioctx = ref.pool.ioctx();
+    r = rgw_rados_operate(dpp, ioctx, ref.obj.oid, &op, null_yield);
+    if (r < 0) {
+      if (r == -ECANCELED || r == -ENOENT){
+        // we failed in race condition:  1) obj was modified, 2) obj was deleted
+        // in this case we need to retry to make true stale head be cleared
+        ldpp_dout(dpp, 10) << "ERROR DC WorkerQ[" << thr_name() << "] try clear stale head race failed, obj :" << dirent.key.name
+                           << " id tag: " <<  attrs[RGW_ATTR_ID_TAG].c_str() << " head epoch: " << inline_index_epoch << " entry epoch: " << dirent.meta.inline_index_epoch
+                           << " r: " << r << dendl;
+
+      }else{
+        ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] failed to clear the stale head, obj :" << dirent.key.name << " r: " << r << dendl;
+      }
+      continue;
+    }
+
+    // 3. head deleted, gc tails here
+    cls_rgw_obj_chain chain;
+    store->getRados()->update_gc_chain(dpp, obj, manifest , &chain);
+    if (chain.empty()) {
+      return 0;
+    }
+    string tag = dirent.tag;
+    if (store->getRados()->get_gc() == nullptr) {
+      ldpp_dout(dpp, 0) << "deleting objects inline since gc isn't initialized" << dendl;
+      //Delete objects inline just in case gc hasn't been initialised, prevents crashes
+      store->getRados()->delete_objs_inline(dpp, chain, tag);
+    } else {
+      auto [ret, leftover_chain] = store->getRados()->get_gc()->send_split_chain(chain, tag); // do it synchronously
+      if (ret < 0 && leftover_chain) {
+        //Delete objects inline if send chain to gc fails
+        store->getRados()->delete_objs_inline(dpp, *leftover_chain, tag);
+      }
+    }
+  } while(r < 0);
+
+  return r;
 }
 
 void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_name){
@@ -7047,8 +7058,10 @@ int RGWRados::Object::Delete::restore_obj(optional_yield y, const DoutPrefixProv
         ldpp_dout(dpp, 0) << "ERROR: obj("<< origin_obj.key.name<<") restore_index_op.prepare failed,  returned ret=" << r << dendl;
         return r;
     }
+
     bufferlist bl;
-    encode(restore_index_op.get_epoch(), bl);
+    string epoch_s = to_string(restore_index_op.get_epoch());
+    bl.append(epoch_s.c_str(), epoch_s.size());
     restore_op.setxattr(RGW_ATTR_INDEX_POOL_EPOCH, bl); // set index pool epoch in head attr
 
     auto& ioctx = origin_obj_ref.pool.ioctx();
