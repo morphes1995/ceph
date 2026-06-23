@@ -749,10 +749,11 @@ public:
             for(auto bucket_id: inlined_buckets){
               r =dc->set_entry_vacuuming(bucket_id, secs);
               if(r < 0){
-                ldout(cct, 10) << "WARNING: VacuumThread set bucket entry vacuuming failed " << " r:"<< r << dendl;
+                ldout(cct, 10) << "INFO: VacuumThread set bucket[" << bucket_id << "] entry vacuuming failed " << " r:"<< r << dendl;
                 continue;
               }
               r = dc->vacuum_bucket(bucket_id, start);
+              dc->set_entry_vacuuming(bucket_id, 0); // bucket vacuum finished
               if(r < 0){
                 ldout(cct, 0) << "Warning: VacuumThread vacuum_bucket() returned error r=" << r << dendl;
                 break;
@@ -786,6 +787,7 @@ public:
 
     int set_entry(rgw_bucket &bucket, bool disabling);
     int set_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec);
+    bool is_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec);
     int rm_entry(rgw_bucket &bucket);
     int list_entry(vector<string>& buckets, bool only_disabling);
 
@@ -2008,8 +2010,8 @@ public:
   int bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_olh(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_olh_entry *olh);
   int bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, BIIndexType index_type, rgw_cls_bi_entry *entry);
-  int list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
-                                 int shard_id, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags);
+  int list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, string &merge_obj_name,
+                                   map<uint32_t, rgw_merge_obj_stale_frag> &result);
   int finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
                               int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name, rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info);
   void bi_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry);

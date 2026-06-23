@@ -23,6 +23,7 @@ constexpr int RGWBIAdvanceAndRetryError = -EFBIG;
 #define RGW_BUCKET_CHECK_INDEX "bucket_check_index"
 #define RGW_BUCKET_REBUILD_INDEX "bucket_rebuild_index"
 #define RGW_BUCKET_UPDATE_STATS "bucket_update_stats"
+#define RGW_BUCKET_SET_MERGE_OBJ_STATS "bucket_set_merge_obj_stats"
 #define RGW_BUCKET_PREPARE_OP "bucket_prepare_op"
 #define RGW_BUCKET_COMPLETE_OP "bucket_complete_op"
 #define RGW_BUCKET_COMPLETE_ATOMIC_OP "bucket_complete_atomic_op"
@@ -75,6 +76,7 @@ constexpr int RGWBIAdvanceAndRetryError = -EFBIG;
 /* inlined bucket list */
 #define RGW_INLINE_SET_ENTRY "inline_set_entry"
 #define RGW_INLINE_SET_ENTRY_VACUUMING "inline_set_entry_vacuuming"
+#define RGW_INLINE_IS_ENTRY_VACUUMING "inline_is_entry_vacuuming"
 #define RGW_INLINE_RM_ENTRY "inline_rm_entry"
 #define RGW_INLINED_BUCKETS_LIST "inlined_buckets_list"
 #define RGW_LIST_STALE_FRAGS "list_stale_frags"

@@ -345,6 +345,8 @@ void cls_rgw_bucket_update_stats(librados::ObjectWriteOperation& o,
                                  bool absolute,
                                  const std::map<RGWObjCategory, rgw_bucket_category_stats>& stats);
 
+void cls_rgw_bucket_set_merge_obj_stats(librados::ObjectWriteOperation& o, rgw_merge_object_stats &merge_obj_stats, uint32_t current_merge_obj_id);
+
 void cls_rgw_bucket_prepare_op(librados::ObjectWriteOperation& o, RGWModifyOp op, std::string& tag,
                                const cls_rgw_obj_key& key, const std::string& locator, bool log_op,
                                uint16_t bilog_op, rgw_zone_set& zones_trace);
@@ -365,9 +367,6 @@ void cls_rgw_obj_check_mtime_bi(librados::ObjectOperation& o, cls_rgw_obj_key &k
 int cls_rgw_bi_get(librados::IoCtx& io_ctx, const std::string oid,
                    BIIndexType index_type, cls_rgw_obj_key& key,
                    rgw_cls_bi_entry *entry);
-int cls_list_stale_frags(librados::IoCtx& io_ctx, const string oid, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags);
-int cls_obj_finish_vacuum(librados::IoCtx& io_ctx, const string oid, string &src_merge_obj_name, string &dest_merge_obj_name,
-                          rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info);
 void cls_rgw_bi_get_obj_stat_op(librados::ObjectReadOperation& op,
                                BIIndexType index_type, cls_rgw_obj_key& key,
                                bool prefetch_data, std::list<obj_version_cond> &conds, rgw_cls_bi_get_ret *result);
@@ -555,6 +554,28 @@ public:
     CLSRGWConcurrentIO(io_ctx, oids, max_aio), result(dir_headers) {}
 };
 
+class CLSRGWIssueListStaleFrags : public CLSRGWConcurrentIO {
+    map<int, rgw_cls_list_stale_frags_ret> &result;
+    string &merge_obj_name;
+protected:
+    int issue_op(int shard_id, const std::string& oid) override;
+public:
+    CLSRGWIssueListStaleFrags(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, map<int, rgw_cls_list_stale_frags_ret> &list_results, string &_merge_obj_name,
+                            uint32_t max_aio) :
+            CLSRGWConcurrentIO(io_ctx, oids, max_aio), merge_obj_name(_merge_obj_name), result(list_results) {}
+};
+
+class CLSRGWIssueFinishVacuum : public CLSRGWConcurrentIO {
+    std::map<int, rgw_cls_finish_vacuum_op> ops;
+protected:
+    int issue_op(int shard_id, const std::string& oid) override;
+public:
+    CLSRGWIssueFinishVacuum(librados::IoCtx& ioc, std::map<int, std::string>& _bucket_objs,
+                            std::map<int, rgw_cls_finish_vacuum_op> &_ops,
+                            uint32_t _max_aio) : CLSRGWConcurrentIO(ioc, _bucket_objs, _max_aio), ops(_ops) {}
+};
+
+
 class CLSRGWIssueSetBucketResharding : public CLSRGWConcurrentIO {
   cls_rgw_bucket_instance_entry entry;
 protected:
@@ -643,6 +664,7 @@ int cls_rgw_lc_list(librados::IoCtx& io_ctx, const std::string& oid,
 
 int cls_rgw_inline_set_entry(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id, bool disabling);
 int cls_rgw_inline_set_entry_vacuuming(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id, uint64_t rgw_vacuum_process_period_sec);
+bool cls_rgw_inline_is_entry_vacuuming(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id, uint64_t rgw_vacuum_process_period_sec);
 int cls_rgw_inline_rm_entry(librados::IoCtx& io_ctx, const string& oid, const string& bucket_id);
 int cls_rgw_inlined_bucket_list(librados::IoCtx& io_ctx, const string& oid, vector<string>& buckets, bool only_disabling);
 

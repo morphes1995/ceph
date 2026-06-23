@@ -137,6 +137,7 @@ extern int cls_gen_rand_base64(char *dest, int size); /* size should be the requ
 
 /* environment */
 extern uint64_t cls_current_version(cls_method_context_t hctx);
+extern int cls_current_shard_id(cls_method_context_t hctx);
 extern int cls_current_subop_num(cls_method_context_t hctx);
 extern uint64_t cls_get_features(cls_method_context_t hctx);
 extern uint64_t cls_get_client_features(cls_method_context_t hctx);

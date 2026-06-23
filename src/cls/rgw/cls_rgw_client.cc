@@ -263,6 +263,15 @@ void cls_rgw_bucket_update_stats(librados::ObjectWriteOperation& o,
   o.exec(RGW_CLASS, RGW_BUCKET_UPDATE_STATS, in);
 }
 
+void cls_rgw_bucket_set_merge_obj_stats(librados::ObjectWriteOperation& o, rgw_merge_object_stats &merge_obj_stats, uint32_t current_merge_obj_id){
+  rgw_cls_bucket_set_merge_obj_stats_op call;
+  call.merge_obj_stats = merge_obj_stats;
+  call.current_merge_obj_id = current_merge_obj_id; // shard switch to new merge obj
+  bufferlist in;
+  encode(call, in);
+  o.exec(RGW_CLASS, RGW_BUCKET_SET_MERGE_OBJ_STATS, in);
+}
+
 void cls_rgw_bucket_prepare_op(ObjectWriteOperation& o, RGWModifyOp op, string& tag,
                                const cls_rgw_obj_key& key, const string& locator, bool log_op,
                                uint16_t bilog_flags, rgw_zone_set& zones_trace)
@@ -496,39 +505,16 @@ int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
   return 0;
 }
 
-int cls_list_stale_frags(librados::IoCtx& io_ctx, const string oid, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags)
+void cls_rgw_bucket_stale_frags_list_op(librados::ObjectReadOperation& op,
+                            const std::string& merge_obj_name,
+                            rgw_cls_list_stale_frags_ret* result)
 {
-  bufferlist in, out;
+  bufferlist in;
   rgw_cls_list_stale_frags_op call;
   call.merge_obj_name = merge_obj_name;
   encode(call, in);
-  int r = io_ctx.exec(oid, RGW_CLASS, RGW_LIST_STALE_FRAGS, in, out);
-  if (r < 0)
-    return r;
-
-  rgw_cls_list_stale_frags_ret op_ret;
-  auto iter = out.cbegin();
-  try {
-    decode(op_ret, iter);
-  } catch (ceph::buffer::error& err) {
-    return -EIO;
-  }
-  frags.swap(op_ret.frags);
-
-  return 0;
-}
-
-int cls_obj_finish_vacuum(librados::IoCtx& io_ctx, const string oid, string &src_merge_obj_name, string &dest_merge_obj_name,
-                          rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info)
-{
-  bufferlist in, out;
-  rgw_cls_finish_vacuum_op call;
-  call.src_merge_obj_name =src_merge_obj_name;
-  call.dest_merge_obj_name = dest_merge_obj_name;
-  call.new_merge_obj = dest_merge_obj;
-  call.new_offsets_info = new_offsets_info;
-  encode(call, in);
-  return io_ctx.exec(oid, RGW_CLASS, RGW_FINISH_VACUUM, in, out);
+  op.exec(RGW_CLASS, RGW_LIST_STALE_FRAGS, in,
+          new ClsBucketIndexOpCtx<rgw_cls_list_stale_frags_ret>(result, NULL));
 }
 
 /*
@@ -872,6 +858,29 @@ int CLSRGWIssueGetDirHeader::issue_op(const int shard_id, const string& oid)
   return issue_bucket_list_op(io_ctx, shard_id, oid,
 			      empty_key, empty_prefix, empty_delimiter,
 			      0, false, &manager, &result[shard_id]);
+}
+
+
+int CLSRGWIssueListStaleFrags::issue_op(const int shard_id, const string& oid)
+{
+  cls_rgw_obj_key empty_key;
+  string empty_prefix;
+  string empty_delimiter;
+
+  librados::ObjectReadOperation op;
+  cls_rgw_bucket_stale_frags_list_op(op,
+                                     merge_obj_name, &result[shard_id]);
+  return manager.aio_operate(io_ctx, shard_id, oid, &op);
+}
+
+int CLSRGWIssueFinishVacuum::issue_op(const int shard_id, const string& oid)
+{
+  rgw_cls_finish_vacuum_op &call = ops[shard_id];
+  bufferlist in;
+  encode(call, in);
+  librados::ObjectWriteOperation op;
+  op.exec(RGW_CLASS, RGW_FINISH_VACUUM, in);
+  return manager.aio_operate(io_ctx, shard_id, oid, &op);
 }
 
 static bool issue_resync_bi_log(librados::IoCtx& io_ctx, const int shard_id, const string& oid, BucketIndexAioManager *manager)
@@ -1240,6 +1249,20 @@ int cls_rgw_inline_set_entry_vacuuming(IoCtx& io_ctx, const string& oid, const s
   encode(call, in);
   int r = io_ctx.exec(oid, RGW_CLASS, RGW_INLINE_SET_ENTRY_VACUUMING, in, out);
   return r;
+}
+
+bool cls_rgw_inline_is_entry_vacuuming(IoCtx& io_ctx, const string& oid, const string& bucket_id, uint64_t rgw_vacuum_process_period_sec)
+{
+  bufferlist in, out;
+  cls_rgw_inline_entry_set_vacuuming_op call;
+  call.bucket_id = bucket_id;
+  call.rgw_vacuum_process_period_sec = rgw_vacuum_process_period_sec;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_INLINE_IS_ENTRY_VACUUMING, in, out);
+  if (r == 0){
+    return false;
+  }
+  return true;
 }
 
 int cls_rgw_inline_rm_entry(IoCtx& io_ctx, const string& oid, const string& bucket_id)

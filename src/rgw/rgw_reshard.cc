@@ -66,6 +66,10 @@ class BucketReshardShard {
   RGWRados::BucketShard bs;
   vector<rgw_cls_bi_entry> entries;
   map<RGWObjCategory, rgw_bucket_category_stats> stats;
+
+  rgw_merge_object_stats merge_obj_stats;
+  uint32_t max_merge_obj_id;
+
   deque<librados::AioCompletion *>& aio_completions;
   uint64_t max_aio_completions;
   uint64_t reshard_shard_batch_size;
@@ -106,7 +110,7 @@ public:
                      rgw::sal::RGWRadosStore *_store, const RGWBucketInfo& _bucket_info,
                      int _num_shard, const rgw::bucket_index_layout_generation& _idx_layout,
                      deque<librados::AioCompletion *>& _completions) :
-    store(_store), bucket_info(_bucket_info), idx_layout(_idx_layout), bs(store->getRados()),
+    store(_store), bucket_info(_bucket_info), idx_layout(_idx_layout), bs(store->getRados()), max_merge_obj_id(0),
     aio_completions(_completions)
   {
     num_shard = (idx_layout.layout.normal.num_shards > 0 ? _num_shard : -1);
@@ -145,6 +149,21 @@ public:
     return 0;
   }
 
+  int add_merge_obj_stats(int shard_index, std::map<uint32_t,rgw_merge_object_stat> &stats) {
+    auto &shard_merge_obj_stats = merge_obj_stats.stats[shard_index];
+    for (auto &item: stats){
+      if(bs.shard_id == shard_index){
+        if (item.first > max_merge_obj_id){
+          max_merge_obj_id = item.first;
+        }
+      }
+      shard_merge_obj_stats[item.first].size +=  item.second.size;
+      shard_merge_obj_stats[item.first].version =  item.second.version;
+      shard_merge_obj_stats[item.first].size_to_release += item.second.size_to_release;
+      shard_merge_obj_stats[item.first].writing = false; // after reshard, start from a new merge obj
+    }
+  }
+
   int flush() {
     if (entries.size() == 0) {
       return 0;
@@ -168,6 +187,24 @@ public:
     }
     entries.clear();
     stats.clear();
+    return 0;
+  }
+
+  int flush_merge_obj_stats(){
+    librados::ObjectWriteOperation op;
+    uint32_t current_merge_obj_id = max_merge_obj_id + 1;
+    cls_rgw_bucket_set_merge_obj_stats(op, merge_obj_stats, current_merge_obj_id);
+
+    librados::AioCompletion *c;
+    int ret = get_completion(&c);
+    if (ret < 0) {
+      return ret;
+    }
+    ret = bs.bucket_obj.aio_operate(c, &op);
+    if (ret < 0) {
+      derr << "ERROR: failed to set merge obj stats in target bucket shard (bs=" << bs.bucket << "/" << bs.shard_id << ") error=" << cpp_strerror(-ret) << dendl;
+      return ret;
+    }
     return 0;
   }
 
@@ -230,6 +267,10 @@ public:
     return 0;
   }
 
+  void add_merge_obj_stats(int target_shard_id, int origin_shard_id, std::map<uint32_t,rgw_merge_object_stat> &stats){
+    target_shards[target_shard_id]->add_merge_obj_stats(origin_shard_id, stats);
+  }
+
   int finish() {
     int ret = 0;
     for (auto& shard : target_shards) {
@@ -250,6 +291,26 @@ public:
     target_shards.clear();
     return ret;
   }
+
+  int finish_merge_obj_stats(){
+    int ret = 0;
+    for (auto& shard : target_shards) {
+      int r = shard->flush_merge_obj_stats();
+      if (r < 0) {
+        derr << "ERROR: target_shards[" << shard->get_num_shard() << "].flush_merge_obj_stats() returned error: " << cpp_strerror(-r) << dendl;
+        ret = r;
+      }
+    }
+    for (auto& shard : target_shards) {
+      int r = shard->wait_all_aio();
+      if (r < 0) {
+        derr << "ERROR: target_shards[" << shard->get_num_shard() << "].wait_all_aio() returned error: " << cpp_strerror(-r) << dendl;
+        ret = r;
+      }
+    }
+    return ret;
+  }
+
 }; // class BucketReshardManager
 
 RGWBucketReshard::RGWBucketReshard(rgw::sal::RGWRadosStore *_store,
@@ -597,6 +658,21 @@ int RGWBucketReshard::do_reshard(int num_shards,
     bool is_truncated = true;
     marker.clear();
     const std::string null_object_filter; // empty string since we're not filtering by object
+
+    // read shard header
+    vector<rgw_bucket_dir_header> headers;
+    map<int, string> bucket_instance_ids;
+    int r = store->getRados()->cls_bucket_head(dpp, bucket_info, i, headers, &bucket_instance_ids);
+    if (r < 0) {
+      return r;
+    }
+
+    uint64_t total_merge_obj_stale_frags_size = 0;
+    for (auto& item: headers[0].merge_obj_stats.stats) {
+      int target_shard_index = item.first % num_target_shards;
+      target_shards_mgr.add_merge_obj_stats(target_shard_index, item.first, item.second);
+    }
+
     while (is_truncated) {
       entries.clear();
       ret = store->getRados()->bi_list(dpp, bucket_info, i, null_object_filter, marker, max_entries, &entries, &is_truncated);
@@ -614,6 +690,7 @@ int RGWBucketReshard::do_reshard(int num_shards,
 	  encode_json("num_entry", total_entries, formatter);
 	  encode_json("entry", entry, formatter);
 	}
+
 	total_entries++;
 
 	marker = entry.idx;
@@ -674,14 +751,20 @@ int RGWBucketReshard::do_reshard(int num_shards,
 	  (*out) << " " << total_entries;
 	}
       } // entries loop
-    }
-  }
+    } // while loop
+  } // shard loop
 
   if (verbose_json_out) {
     formatter->close_section();
     formatter->flush(*out);
   } else if (out) {
     (*out) << " " << total_entries << std::endl;
+  }
+
+  ret = target_shards_mgr.finish_merge_obj_stats();
+  if (ret < 0) {
+    ldpp_dout(dpp, -1) << "ERROR: failed to update merge obj stats when resharding" << dendl;
+    return -EIO;
   }
 
   ret = target_shards_mgr.finish();
@@ -722,6 +805,7 @@ int RGWBucketReshard::execute(int num_shards, int max_op_entries,
     return ret;
   }
 
+  string bucket_id = string_join_reserve(':', bucket_info.bucket.tenant, bucket_info.bucket.name, bucket_info.bucket.marker);
   RGWBucketInfo new_bucket_info;
   ret = create_new_bucket_instance(num_shards, new_bucket_info, dpp);
   if (ret < 0) {
@@ -734,6 +818,12 @@ int RGWBucketReshard::execute(int num_shards, int max_op_entries,
     if (ret < 0) {
       goto error_out;
     }
+  }
+
+  if(store->getRados()->dc->is_entry_vacuuming(bucket_id, store->ctx()->_conf->rgw_vacuum_process_period_sec)){
+    ldpp_dout(dpp, -1) << "Error: " << __func__ <<
+                      " failed to reshard bucket:" << bucket_id <<  ", bucket is vacuuming !" << dendl;
+    goto error_out;
   }
 
   // set resharding status of current bucket_info & shards with

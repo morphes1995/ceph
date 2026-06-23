@@ -826,6 +826,30 @@ int rgw_bucket_update_stats(cls_method_context_t hctx, bufferlist *in, bufferlis
   return write_bucket_header(hctx, &header);
 }
 
+int rgw_bucket_set_merge_obj_stats(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  rgw_cls_bucket_set_merge_obj_stats_op op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
+    return rc;
+  }
+  header.merge_obj_stats = op.merge_obj_stats;
+  header.current_merge_obj_id = op.current_merge_obj_id;
+
+  return write_bucket_header(hctx, &header);
+}
+
 int rgw_bucket_init_index(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   CLS_LOG(10, "entered %s()\n", __func__);
@@ -1064,7 +1088,7 @@ static int complete_remove_obj(cls_method_context_t hctx,
 }
 
 static int add_stale_frag(cls_method_context_t hctx, rgw_bucket_dir_header *header, string &merge_obj_name, uint32_t offset, uint32_t size){
-  header->merge_obj_stats.add_stale_frag(merge_obj_name, size);
+  header->merge_obj_stats.add_stale_frag(merge_obj_name, size, cls_current_shard_id(hctx));
   std::string stale_frag_key;
   encode_stale_frag_key(merge_obj_name, offset, &stale_frag_key);
   rgw_merge_obj_stale_frag stale_frag;
@@ -5245,18 +5269,54 @@ static int rgw_cls_inline_set_entry_vacuuming(cls_method_context_t hctx, bufferl
     CLS_LOG(1, "ERROR: %s: failed to decode entry", __func__);
     return -EIO;
   }
-  uint64_t  now = ceph_clock_now().to_msec();
-  if (entry.vacuuming && (now - entry.vacuuming_start_time) <= op.rgw_vacuum_process_period_sec*1000 * 2/3){
-    return -ECANCELED; // bucket is vacuuming now
+  if(op.rgw_vacuum_process_period_sec == 0){
+    entry.vacuuming = false; // unset vacuuming
+  }else{
+    uint64_t  now = ceph_clock_now().to_msec();
+    if (entry.vacuuming && (now - entry.vacuuming_start_time) <= op.rgw_vacuum_process_period_sec*1000){
+      return -ECANCELED; // bucket is vacuuming now
+    }
+    entry.vacuuming = true;
+    entry.vacuuming_start_time = now;
   }
-
-  entry.vacuuming = true;
-  entry.vacuuming_start_time = now;
   bufferlist new_bl;
   encode(entry, new_bl);
 
   int ret = cls_cxx_map_set_val(hctx, op.bucket_id, &new_bl);
   return ret;
+}
+
+static int rgw_cls_inline_is_entry_vacuuming(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  auto in_iter = in->cbegin();
+
+  cls_rgw_inline_entry_set_vacuuming_op op;
+  try {
+    decode(op, in_iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode entry\n", __func__ );
+    return -EINVAL;
+  }
+
+  bufferlist entry_bl;
+  int rc = cls_cxx_map_get_val(hctx, op.bucket_id, &entry_bl);
+  if (rc < 0) {
+    return rc;
+  }
+  cls_rgw_inline_entry_op entry;
+  auto cur_iter = entry_bl.cbegin();
+  try {
+    decode(entry, cur_iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode entry", __func__);
+    return -EIO;
+  }
+  uint64_t  now = ceph_clock_now().to_msec();
+  if (entry.vacuuming && (now - entry.vacuuming_start_time) <= op.rgw_vacuum_process_period_sec*1000){
+    return -ECANCELED; // bucket is vacuuming now
+  }
+  return 0;
 }
 
 static int rgw_cls_inline_rm_entry(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
@@ -5324,13 +5384,31 @@ static int rgw_list_stale_frags(cls_method_context_t hctx, bufferlist *in,
                                         bufferlist *out)
 {
   CLS_LOG(10, "entered %s()\n", __func__);
+  rgw_cls_list_stale_frags_ret ret;
   rgw_cls_list_stale_frags_op op;
   auto in_iter = in->cbegin();
   try {
     decode(op, in_iter);
   } catch (ceph::buffer::error& err) {
     CLS_LOG(1, "ERROR: rgw_list_stale_frags(): failed to decode entry\n");
-    return -EINVAL;
+    ret.ret_code = -EINVAL;
+    encode(ret, *out);
+    return 0;
+  }
+
+  rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
+    ret.ret_code = rc;
+    encode(ret, *out);
+    return 0;
+  }
+  if (header.resharding()) {
+    CLS_LOG(1, "WARNING: %s: resahrding, op canceled\n", __func__);
+    ret.ret_code = -ECANCELED;
+    encode(ret, *out);
+    return 0;
   }
 
   std::string start_after_omap_key;
@@ -5338,12 +5416,13 @@ static int rgw_list_stale_frags(cls_method_context_t hctx, bufferlist *in,
   start_after_omap_key.append(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX]);
   start_after_omap_key.append(op.merge_obj_name);
 
-  rgw_cls_list_stale_frags_ret ret;
   map<string, bufferlist> vals;
   bool more;
   int r = cls_cxx_map_get_vals(hctx, start_after_omap_key, start_after_omap_key, LONG_MAX, &vals, &more);
-  if (r < 0)
-    return r;
+  if (r < 0){
+    ret.ret_code = r;
+    goto done;
+  }
 
   for (auto it = vals.begin(); it != vals.end(); ++it) {
     rgw_merge_obj_stale_frag frag;
@@ -5351,11 +5430,14 @@ static int rgw_list_stale_frags(cls_method_context_t hctx, bufferlist *in,
     try {
       decode(frag, iter);
     } catch (buffer::error& err) {
-      return -EIO;
+      ret.ret_code = r;
+      goto done;
     }
 
    ret.frags[frag.offset] = frag;
   }
+  ret.ret_code = 0;
+done:
   encode(ret, *out);
   return 0;
 }
@@ -5385,6 +5467,7 @@ static int rgw_cls_finish_vacuum(cls_method_context_t hctx, bufferlist *in,
     return -EINVAL;
   }
   if (header.resharding()) {
+    CLS_LOG(1, "WARNING: %s: resahrding, op canceled\n", __func__);
     return -ECANCELED;
   }
 
@@ -5395,7 +5478,11 @@ static int rgw_cls_finish_vacuum(cls_method_context_t hctx, bufferlist *in,
   }
 
   // 1.
-  header.merge_obj_stats.set_merge_obj(op.dest_merge_obj_name, op.new_merge_obj);
+  if(op.owner_shard){
+    header.merge_obj_stats.set_merge_obj(op.dest_merge_obj_name, op.new_merge_obj);
+  }else{
+    header.merge_obj_stats.rm_merge_obj(op.src_merge_obj_name);
+  }
 
   // 2.
   for(auto &off: op.new_offsets_info.offsets){
@@ -5706,6 +5793,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_bucket_check_index;
   cls_method_handle_t h_rgw_bucket_rebuild_index;
   cls_method_handle_t h_rgw_bucket_update_stats;
+  cls_method_handle_t h_rgw_bucket_set_merge_obj_stats;
   cls_method_handle_t h_rgw_bucket_prepare_op;
   cls_method_handle_t h_rgw_bucket_complete_op;
   cls_method_handle_t h_rgw_bucket_complete_atomic_op;
@@ -5744,6 +5832,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_lc_list_entries;
   cls_method_handle_t h_rgw_inline_set_entry;
   cls_method_handle_t h_rgw_inline_set_entry_vacuuming;
+  cls_method_handle_t h_rgw_inline_is_entry_vacuuming;
   cls_method_handle_t h_rgw_inline_rm_entry;
   cls_method_handle_t h_rgw_cls_inlined_buckets_list;
   cls_method_handle_t h_rgw_cls_list_stale_frags;
@@ -5769,6 +5858,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BUCKET_CHECK_INDEX, CLS_METHOD_RD, rgw_bucket_check_index, &h_rgw_bucket_check_index);
   cls_register_cxx_method(h_class, RGW_BUCKET_REBUILD_INDEX, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_rebuild_index, &h_rgw_bucket_rebuild_index);
   cls_register_cxx_method(h_class, RGW_BUCKET_UPDATE_STATS, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_update_stats, &h_rgw_bucket_update_stats);
+  cls_register_cxx_method(h_class, RGW_BUCKET_SET_MERGE_OBJ_STATS, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_set_merge_obj_stats, &h_rgw_bucket_set_merge_obj_stats);
   cls_register_cxx_method(h_class, RGW_BUCKET_PREPARE_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_prepare_op, &h_rgw_bucket_prepare_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_op, &h_rgw_bucket_complete_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_ATOMIC_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_atomic_op, &h_rgw_bucket_complete_atomic_op);
@@ -5821,6 +5911,7 @@ CLS_INIT(rgw)
   /* inlined bucket list */
   cls_register_cxx_method(h_class, RGW_INLINE_SET_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_inline_set_entry, &h_rgw_inline_set_entry);
   cls_register_cxx_method(h_class, RGW_INLINE_SET_ENTRY_VACUUMING, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_inline_set_entry_vacuuming, &h_rgw_inline_set_entry_vacuuming);
+  cls_register_cxx_method(h_class, RGW_INLINE_IS_ENTRY_VACUUMING, CLS_METHOD_RD, rgw_cls_inline_is_entry_vacuuming, &h_rgw_inline_is_entry_vacuuming);
   cls_register_cxx_method(h_class, RGW_INLINE_RM_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_cls_inline_rm_entry, &h_rgw_inline_rm_entry);
   cls_register_cxx_method(h_class, RGW_INLINED_BUCKETS_LIST, CLS_METHOD_RD, rgw_cls_inlined_buckets_list, &h_rgw_cls_inlined_buckets_list);
   cls_register_cxx_method(h_class, RGW_LIST_STALE_FRAGS, CLS_METHOD_RD, rgw_list_stale_frags, &h_rgw_cls_list_stale_frags);

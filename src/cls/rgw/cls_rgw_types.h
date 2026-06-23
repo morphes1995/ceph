@@ -979,10 +979,19 @@ struct rgw_merge_object_stats {
     }
     void dump(ceph::Formatter *f) const;
 
-    void add_stale_frag(string &merge_obj_name, uint64_t size){
+    void add_stale_frag(string &merge_obj_name, uint64_t size, int this_shard){
       int shard_id;
       uint32_t merge_obj_id;
-      _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
+      int version;
+      _parse_name(merge_obj_name, &shard_id, &merge_obj_id, &version);
+
+      if (stats[shard_id].find(merge_obj_id) == stats[shard_id].end()){
+        if(shard_id != this_shard){
+          stats[shard_id][merge_obj_id].writing = false;
+          stats[shard_id][merge_obj_id].version = version;
+        }
+      }
+
       stats[shard_id][merge_obj_id].size_to_release += size;
     }
 
@@ -998,6 +1007,9 @@ struct rgw_merge_object_stats {
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
       stats[shard_id].erase(merge_obj_id);
+      if(stats[shard_id].empty()){
+        stats.erase(shard_id);
+      }
     }
 
     void set_merge_obj_size(string &merge_obj_name, uint32_t size){

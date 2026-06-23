@@ -4561,6 +4561,12 @@ int RGWRadosDetacher::set_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum
   return cls_rgw_inline_set_entry_vacuuming(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id, rgw_vacuum_process_period_sec);
 }
 
+bool RGWRadosDetacher::is_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec)
+{
+  string oid = "inline.1";
+  return cls_rgw_inline_is_entry_vacuuming(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id, rgw_vacuum_process_period_sec);
+}
+
 int RGWRadosDetacher::rm_entry(rgw_bucket &bucket)
 {
   string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
@@ -4641,6 +4647,20 @@ int RGWRadosDetacher::vacuum_bucket(string &bucket_id, utime_t &start){
     return ret;
   }
 
+  vector<rgw_bucket_dir_header> headers;
+  map<int, string> bucket_instance_ids;
+  int r = store->getRados()->cls_bucket_head(dpp, bucket->get_info(), RGW_NO_SHARD, headers, &bucket_instance_ids);
+  if (r < 0) {
+    return r;
+  }
+  auto iter = headers.begin();
+  for(; iter != headers.end(); ++iter) {
+    if(iter->new_instance.reshard_status != cls_rgw_reshard_status::NOT_RESHARDING){
+      ldpp_dout(dpp, 1) << __func__  <<"bucket " << bucket->get_name() << "is resharding, vacuum canceled" << bucket_name << dendl;
+      return -ECANCELED;
+    }
+  }
+
   // read bucket stats
   string bucket_ver;
   string master_ver;
@@ -4689,9 +4709,12 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
     return;
   }
 
-  // 1. read merge obj stale frags;
+  // 1. read merge obj stale frags from all shards;
   map<uint32_t, rgw_merge_obj_stale_frag> stale_frags;
-  store->getRados()->list_stale_frags(dpp, bucket->get_info(), shard_id, src_merge_obj_name, stale_frags);
+  int r = store->getRados()->list_stale_frags(dpp, bucket->get_info(), src_merge_obj_name, stale_frags);
+  if (r < 0){
+    return;
+  }
 
   int total_frags_size = 0;
   for (const auto &item: stale_frags){
@@ -4707,7 +4730,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
   rgw_obj rgw_merge_obj(bucket->get_info().bucket, src_merge_obj_name);
   store->get_raw_obj(bucket->get_info().placement_rule, rgw_merge_obj, &raw_merge_obj);
   rgw_rados_ref ref;
-  int r = store->getRados()->get_raw_obj_ref(dpp, raw_merge_obj, &ref);
+  r = store->getRados()->get_raw_obj_ref(dpp, raw_merge_obj, &ref);
   if (r < 0) {
     ldpp_dout(dpp, 1) << "failed to get src merge obj ref " << src_merge_obj_name << dendl;
     return ;
@@ -4877,7 +4900,7 @@ void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint1
   // remove stale fragments entries
   int r = store->getRados()->finish_vacuum(dpp, bucket->get_info(), shard_id, src_merge_obj_name, dummy_dest_merge_obj_name, dummy_obj, dummy_offsets_info);
   if (r < 0) {
-    ldpp_dout(dpp, 1) << "vacuum finish failed : "<<  " r:" << r << dendl;
+    ldpp_dout(dpp, 1) << __func__ << "vacuum finish failed : "<<  " r:" << r << dendl;
     return ;
   }
 
@@ -6293,8 +6316,26 @@ static void accumulate_raw_stats(const rgw_bucket_dir_header& header,
 static void accumulate_stale_frags(const rgw_bucket_dir_header& header,
                                        rgw_merge_object_stats *merge_objects_stale_frags)
 {
-  for (const auto& pair: header.merge_obj_stats.stats) {
-    merge_objects_stale_frags->stats[pair.first] = pair.second;
+  for (auto& shard: header.merge_obj_stats.stats) {
+    std::map<uint32_t,rgw_merge_object_stat> &shard_stats = merge_objects_stale_frags->stats[shard.first];
+    for (auto &item: shard.second){
+      bool exist = shard_stats.find(item.first) != shard_stats.end();
+      if(exist){
+        ceph_assert(shard_stats[item.first].version == item.second.version);
+        ceph_assert(!item.second.writing);
+      }
+      if (shard_stats.find(item.first) == shard_stats.end()){
+        shard_stats[item.first] = rgw_merge_object_stat();
+        shard_stats[item.first].writing = false;
+      }
+      rgw_merge_object_stat &stat = shard_stats[item.first];
+      stat.version = item.second.version;
+      stat.size += item.second.size;
+      stat.size_to_release += item.second.size_to_release;
+      if(item.second.writing){
+        stat.writing = true;
+      }
+    }
   }
 }
 
@@ -10391,33 +10432,77 @@ int RGWRados::bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_
   return cls_rgw_bi_get(ref.pool.ioctx(), ref.obj.oid, index_type, key, entry);
 }
 
-int RGWRados::list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
-                               int shard_id, string &merge_obj_name, map<uint32_t, rgw_merge_obj_stale_frag> &frags)
+int RGWRados::list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, string &merge_obj_name,
+                                map<uint32_t, rgw_merge_obj_stale_frag> &result)
 {
-  BucketShard bs(this);
-  int r = bs.init(dpp, bucket_info, bucket_info.layout.current_index, shard_id);
+  RGWSI_RADOS::Pool index_pool;
+  map<int, string> oids;
+  int r = svc.bi_rados->open_bucket_index(dpp, bucket_info, RGW_NO_SHARD, &index_pool, &oids, nullptr);
   if (r < 0) {
-    ldpp_dout(dpp, -1) << "ERROR: bucket shard init failed ret=" << r << dendl;
+    ldpp_dout(dpp, 20) << "cls_bucket_head: open_bucket_index() returned "
+                       << r << dendl;
     return r;
   }
-  auto& ref = bs.bucket_obj.get_ref();
 
-  return cls_list_stale_frags(ref.pool.ioctx(), ref.obj.oid, merge_obj_name, frags);
+  map<int, rgw_cls_list_stale_frags_ret> list_result; /* shard_id -> <offset, frag>*/
+  for (const auto &item: oids){
+    list_result[item.first] = rgw_cls_list_stale_frags_ret();
+  }
+  r = CLSRGWIssueListStaleFrags(index_pool.ioctx(), oids, list_result, merge_obj_name, cct->_conf->rgw_bucket_index_max_aio)();
+  if (r < 0) {
+    ldpp_dout(dpp, 20) << "cls_bucket_head: CLSRGWIssueListStaleFrags() returned "
+                       << r << dendl;
+    return r;
+  }
+  for (const auto &shard: list_result){
+    if (shard.second.ret_code < 0){
+      ldpp_dout(dpp, 1) << __func__ <<"WARNING: shard " << shard.first << " ret:" << shard.second.ret_code << dendl;
+      return shard.second.ret_code;
+    }
+    result.insert(shard.second.frags.begin(), shard.second.frags.end());
+  }
+
+  return 0;
 }
 
 int RGWRados::finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
                                int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name,
                             rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info)
 {
-  BucketShard bs(this);
-  int r = bs.init(dpp, bucket_info, bucket_info.layout.current_index, shard_id);
+  RGWSI_RADOS::Pool index_pool;
+  map<int, string> bucket_objs;
+  int r = svc.bi_rados->open_bucket_index(dpp, bucket_info, std::nullopt, &index_pool, &bucket_objs, nullptr);
   if (r < 0) {
-    ldpp_dout(dpp, -1) << "ERROR: bucket shard init failed ret=" << r << dendl;
     return r;
   }
-  auto& ref = bs.bucket_obj.get_ref();
 
-  return cls_obj_finish_vacuum(ref.pool.ioctx(), ref.obj.oid, src_merge_obj_name, dest_merge_obj_name, dest_merge_obj, new_offsets_info);
+  // build finish vacuum op for each shard
+  int num_shards = (bucket_info.layout.current_index.layout.normal.num_shards > 0 ? bucket_info.layout.current_index.layout.normal.num_shards : 1);
+  std::map<int, rgw_cls_finish_vacuum_op> ops;
+  for (const auto &obj: bucket_objs){
+    rgw_cls_finish_vacuum_op op;
+    op.src_merge_obj_name = src_merge_obj_name;
+    op.dest_merge_obj_name = dest_merge_obj_name;
+    op.new_merge_obj = dest_merge_obj;
+    if(shard_id % num_shards == obj.first){
+      op.owner_shard = true;
+    }else{
+      op.owner_shard = false;
+    }
+    ops[obj.first] = op;
+  }
+  for (const auto &off: new_offsets_info.offsets){
+    int target_shard_id = 0;
+    int ret = store->getRados()->get_target_shard_id(bucket_info.layout.current_index.layout.normal, off.obj_name, &target_shard_id);
+    if (ret < 0) {
+      ldpp_dout(dpp, -1) << __func__ << "ERROR: get_target_shard_id() returned ret=" << ret << dendl;
+      return ret;
+    }
+    ops[target_shard_id].new_offsets_info.offsets.push_back(off);
+  }
+
+  r = CLSRGWIssueFinishVacuum(index_pool.ioctx(), bucket_objs, ops, cct->_conf->rgw_bucket_index_max_aio)();
+  return r;
 }
 
 

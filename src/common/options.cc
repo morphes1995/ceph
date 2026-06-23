@@ -6097,6 +6097,7 @@ std::vector<Option> get_rgw_options() {
 
     Option("rgw_vacuum_process_period_sec", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
             .set_default(3600)
+            .set_min(10)
             .set_description("rgw vacuum thread cycle run time")
             .set_long_description("rgw vacuum thread cycle run time"),
     Option("rgw_vacuum_threshold_pct", Option::TYPE_FLOAT, Option::LEVEL_ADVANCED)

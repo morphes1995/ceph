@@ -591,6 +591,27 @@ struct rgw_cls_bucket_update_stats_op
 };
 WRITE_CLASS_ENCODER(rgw_cls_bucket_update_stats_op)
 
+struct rgw_cls_bucket_set_merge_obj_stats_op
+{
+    rgw_merge_object_stats merge_obj_stats;
+    uint32_t  current_merge_obj_id;
+    rgw_cls_bucket_set_merge_obj_stats_op() {}
+
+    void encode(ceph::buffer::list &bl) const {
+    ENCODE_START(1, 1, bl);
+      encode(merge_obj_stats, bl);
+      encode(current_merge_obj_id, bl);
+    ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+    DECODE_START(1, bl);
+      decode(merge_obj_stats, bl);
+      decode(current_merge_obj_id, bl);
+    DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bucket_set_merge_obj_stats_op)
+
 struct rgw_cls_obj_remove_op {
   std::list<std::string> keep_attr_prefixes;
 
@@ -768,17 +789,20 @@ WRITE_CLASS_ENCODER(rgw_cls_list_stale_frags_op)
 
 struct rgw_cls_list_stale_frags_ret {
     map<uint32_t, rgw_merge_obj_stale_frag> frags;
-    rgw_cls_list_stale_frags_ret() {}
+    int ret_code;
+    rgw_cls_list_stale_frags_ret(): ret_code(0) {}
 
     void encode(ceph::buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
         encode(frags, bl);
+        encode(ret_code, bl);
       ENCODE_FINISH(bl);
     }
 
     void decode(ceph::buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
         decode(frags, bl);
+        decode(ret_code, bl);
       DECODE_FINISH(bl);
     }
 };
@@ -789,6 +813,7 @@ struct rgw_cls_finish_vacuum_op {
     string dest_merge_obj_name;
     rgw_merge_object_stat new_merge_obj;
     rgw_object_offsets_info new_offsets_info;
+    bool owner_shard;
     rgw_cls_finish_vacuum_op() {}
 
     void encode(ceph::buffer::list& bl) const {
@@ -797,6 +822,7 @@ struct rgw_cls_finish_vacuum_op {
         encode(dest_merge_obj_name, bl);
         encode(new_merge_obj, bl);
         encode(new_offsets_info, bl);
+        encode(owner_shard, bl);
       ENCODE_FINISH(bl);
     }
 
@@ -806,6 +832,7 @@ struct rgw_cls_finish_vacuum_op {
         decode(dest_merge_obj_name, bl);
         decode(new_merge_obj, bl);
         decode(new_offsets_info, bl);
+        decode(owner_shard, bl);
       DECODE_FINISH(bl);
     }
 };

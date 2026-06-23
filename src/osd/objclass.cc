@@ -614,6 +614,14 @@ uint64_t cls_current_version(cls_method_context_t hctx)
   return ctx->pg->get_last_user_version();
 }
 
+int cls_current_shard_id(cls_method_context_t hctx)
+{
+  PrimaryLogPG::OpContext *ctx = *(PrimaryLogPG::OpContext **)hctx;
+//  CLS_LOG(10, "entered %s, current_shard_name %s", __func__, ctx->obc->obs.oi.soid.oid.name.c_str());
+  string key = ctx->obc->obs.oi.soid.oid.name;
+  return atoi(key.substr(key.find_last_of('.')+1, key.size()).c_str());
+}
+
 
 int cls_current_subop_num(cls_method_context_t hctx)
 {
