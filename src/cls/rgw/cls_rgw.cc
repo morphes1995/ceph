@@ -1088,6 +1088,9 @@ static int complete_remove_obj(cls_method_context_t hctx,
 }
 
 static int add_stale_frag(cls_method_context_t hctx, rgw_bucket_dir_header *header, string &merge_obj_name, uint32_t offset, uint32_t size){
+  if(size == 0){
+    return 0;
+  }
   header->merge_obj_stats.add_stale_frag(merge_obj_name, size, cls_current_shard_id(hctx));
   std::string stale_frag_key;
   encode_stale_frag_key(merge_obj_name, offset, &stale_frag_key);

@@ -3833,7 +3833,7 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
   }
 
   if (bi_entry_ret_code < 0 ) {
-    ldpp_dout(dpp, 0) << "ERROR: obj [" << head_oid << " ] error when fetch bucket index entry state " << dendl;
+    ldpp_dout(dpp, 0) << "WARNING: obj [" << head_oid << " ] error when fetch bucket index entry state r: " << bi_entry_ret_code << dendl;
     return bi_entry_ret_code;
   }
 
@@ -4327,6 +4327,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
   bufferlist merged_bl;
   for(auto entry: entries_to_detach){
     int offset = merged_bl.length();
+    ceph_assert(entry.meta.head_data.length() == entry.meta.head_data_size);
     merged_bl.append(entry.meta.head_data);
 
     rgw_bucket_inlined_entry d;
@@ -4381,7 +4382,9 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
     rgw_object_offsets_info offsets_info;
     bufferlist offsets_bl;
     for(auto &entry: entries_merged){
-      offsets_info.offsets.emplace_back(rgw_object_offset(size + entry.offset, entry.size, entry.key.name, entry.inline_index_epoch));
+      if(entry.size > 0){
+        offsets_info.offsets.emplace_back(rgw_object_offset(size + entry.offset, entry.size, entry.key.name, entry.inline_index_epoch));
+      }
     }
     encode(offsets_info, offsets_bl);
     std::map<std::string, bufferlist> map = {{"offsets_" + to_string(size), offsets_bl}};
@@ -4701,8 +4704,8 @@ int RGWRadosDetacher::vacuum_bucket(string &bucket_id, utime_t &start){
 void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj){
   string src_merge_obj_name = "evoc.merged.big.obj_" + to_string(shard_id)
                               + "_" + to_string(merge_obj_id) + "_" +to_string(src_merge_obj.version);
-  ldpp_dout(dpp, 10) << __func__ << "vacuum merge obj:" << src_merge_obj_name
-                     << " stale size:" << src_merge_obj.size_to_release << " total size:" << src_merge_obj.size << dendl;
+  ldpp_dout(dpp, 10) << __func__ << " vacuum merge obj:" << src_merge_obj_name
+                     << " stale size:" << src_merge_obj.size_to_release << " total size:" << src_merge_obj.size << "writing: "<< src_merge_obj.writing << dendl;
 
   if(src_merge_obj.size_to_release == src_merge_obj.size){
     remove_fully_stale_obj(bucket, shard_id, src_merge_obj_name);
@@ -4718,8 +4721,13 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
 
   int total_frags_size = 0;
   for (const auto &item: stale_frags){
+    ceph_assert(item.first == item.second.offset);
+    ceph_assert(item.second.size > 0);
     total_frags_size += item.second.size;
   }
+  ldpp_dout(dpp, 20) << __func__ << " vacuum merge obj:" << src_merge_obj_name
+                    << " latest stale size:" << total_frags_size << dendl;
+
   if(total_frags_size == src_merge_obj.size){
     remove_fully_stale_obj(bucket, shard_id, src_merge_obj_name);
     return;
@@ -4765,12 +4773,12 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
 
   // 3. calculate new offsets in dest merge object
   rgw_object_offsets_info new_offsets_info;
-  uint32_t dest_merge_obj_size = 0;
+  uint32_t dest_merge_obj_size1 = 0;
   int prev_off = -1;
   for(auto &item : offsets){
     if(stale_frags.find(item.first) == stale_frags.end()){
-        new_offsets_info.offsets.push_back(rgw_object_offset(dest_merge_obj_size, item.second.size, item.second.obj_name, item.second.index_epoch));
-        dest_merge_obj_size += item.second.size;
+        new_offsets_info.offsets.push_back(rgw_object_offset(dest_merge_obj_size1, item.second.size, item.second.obj_name, item.second.index_epoch));
+        dest_merge_obj_size1 += item.second.size;
     }
 
     if(prev_off != -1){
@@ -4778,6 +4786,10 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
     }
     prev_off = item.second.offset;
   }
+
+  ldpp_dout(dpp, 20) << "new offsets size : "<< new_offsets_info.offsets.size()
+                     << " stale frags size:" << stale_frags.size()
+                     << " offsets size: " << offsets.size() << dendl;
   ceph_assert(new_offsets_info.offsets.size() + stale_frags.size() == offsets.size());
   bufferlist new_offsets_bl;
   encode(new_offsets_info, new_offsets_bl);
@@ -4806,7 +4818,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
   }
 
   // 5. move data from src merge obj to dest merge obj
-  dest_merge_obj_size = 0;
+  uint32_t dest_merge_obj_size2 = 0;
   auto iter = offsets.begin();
   while(iter != offsets.end()){
     bufferlist outbl; // contiguous bytes need to reserve to dest
@@ -4837,31 +4849,55 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
         return ;
       }
       ldpp_dout(dpp, 20) << "vacuum thread move "<< len << " bytes from "
-                         << src_merge_obj_name << " to " << dest_merge_obj_name << dendl;
+                         << src_merge_obj_name << ":" << off << " to " << dest_merge_obj_name <<":"<< dest_merge_obj_size2 << dendl;
       // 5.2 write contiguous bytes to dest
       ObjectWriteOperation wop;
-      wop.write(dest_merge_obj_size, outbl);
+      wop.write(dest_merge_obj_size2, outbl);
       r = rgw_rados_operate(dpp, dest_ref.pool.ioctx(), dest_ref.obj.oid, &wop, null_yield);
       if (r < 0) {
         ldpp_dout(dpp, 1) << "failed to write data to : " << dest_merge_obj_name
-                          << " offset:" << dest_merge_obj_size <<  " r:" << r << dendl;
+                          << " offset:" << dest_merge_obj_size2 <<  " r:" << r << dendl;
         return ;
       }
-      dest_merge_obj_size += len;
+      dest_merge_obj_size2 += len;
     }
 
+    // iter now point to end or a stale frag offset
     if(iter != offsets.end()){
+      ldpp_dout(dpp, 20) << "vacuum thread discard "<< iter->second.size << " bytes from "
+                         << src_merge_obj_name << ":" << iter->second.offset << dendl;
       iter++;
     }
   }
-
-  ceph_assert(dest_merge_obj_size + total_frags_size == src_merge_obj.size);
+  ldpp_dout(dpp, 20) << "dest_merge_obj_size1 : "<< dest_merge_obj_size1<< " dest_merge_obj_size2:" << dest_merge_obj_size2 << dendl;
+  ceph_assert(dest_merge_obj_size1 == dest_merge_obj_size2);
+  // debug logs before assertion failed
+  if(dest_merge_obj_size2 + total_frags_size != src_merge_obj.size){
+    ldpp_dout(dpp, 20) << " total offsets in omap: "<< dendl;
+    for(auto &item : offsets){
+      ceph_assert(item.first == item.second.offset);
+      ldpp_dout(dpp, 20) << "off : "<< item.first
+                         << " size:" << item.second.size << dendl;
+    }
+    ldpp_dout(dpp, 20) << " all stale frags: "<< dendl;
+    for (const auto &item: stale_frags){
+      ceph_assert(item.first == item.second.offset);
+      ldpp_dout(dpp, 20) << "off : "<< item.first
+                        << " size:" << item.second.size << dendl;
+    }
+    ldpp_dout(dpp, 20) << " new offsets: "<< dendl;
+    for (const auto &item: new_offsets_info.offsets){
+      ldpp_dout(dpp, 20) << "off : "<< item.offset
+                         << " size:" << item.size << dendl;
+    }
+  }
+  ceph_assert(dest_merge_obj_size2 + total_frags_size == src_merge_obj.size);
 
   // 6. update shard head merge object stats
   // 7. update merge object name and offset in corresponding object bucket index entry
   // 8. remove stale fragments entries
   rgw_merge_object_stat dest_merge_obj;
-  dest_merge_obj.size = dest_merge_obj_size;
+  dest_merge_obj.size = dest_merge_obj_size2;
   dest_merge_obj.version = src_merge_obj.version+1;
   dest_merge_obj.size_to_release = 0;
   dest_merge_obj.writing = false;
@@ -4889,7 +4925,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
     ldpp_dout(dpp, 1) << "ERROR failed to delete src merge obj :" << src_merge_obj_name << " r: " << r << dendl;
     return;
   }
-  ldpp_dout(dpp, 10) << "INFO: merge object:" << src_merge_obj_name << " vacuumed, release " << src_merge_obj.size - dest_merge_obj_size << " bytes. "<< dendl;
+  ldpp_dout(dpp, 10) << "INFO: merge object:" << src_merge_obj_name << " vacuumed, release " << src_merge_obj.size - dest_merge_obj_size2 << " bytes. "<< dendl;
 }
 
 void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint16_t shard_id, string &src_merge_obj_name){
