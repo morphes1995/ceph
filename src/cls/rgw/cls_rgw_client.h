@@ -373,6 +373,7 @@ void cls_rgw_bi_get_obj_stat_op(librados::ObjectReadOperation& op,
 
 int cls_rgw_bi_put(librados::IoCtx& io_ctx, const std::string oid, rgw_cls_bi_entry& entry);
 void cls_rgw_bi_put(librados::ObjectWriteOperation& op, const std::string oid, rgw_cls_bi_entry& entry);
+int cls_rgw_bi_rename(librados::IoCtx& io_ctx, const string oid, string& src_name, string& dest_name, bufferlist &obj_tag, bool to_trash);
 int cls_rgw_bi_ent_remove(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace);
 int cls_rgw_bi_list(librados::IoCtx& io_ctx, const std::string& oid,
                    const std::string& name, const std::string& marker, uint32_t max,

@@ -3833,7 +3833,7 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
   }
 
   if (bi_entry_ret_code < 0 ) {
-    ldpp_dout(dpp, 0) << "ERROR: obj [" << head_oid << " ] error when fetch bucket index entry state " << dendl;
+    ldpp_dout(dpp, 0) << "WARNING: obj [" << head_oid << " ] error when fetch bucket index entry state r: " << bi_entry_ret_code << dendl;
     return bi_entry_ret_code;
   }
 
@@ -4701,8 +4701,8 @@ int RGWRadosDetacher::vacuum_bucket(string &bucket_id, utime_t &start){
 void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj){
   string src_merge_obj_name = "evoc.merged.big.obj_" + to_string(shard_id)
                               + "_" + to_string(merge_obj_id) + "_" +to_string(src_merge_obj.version);
-  ldpp_dout(dpp, 10) << __func__ << "vacuum merge obj:" << src_merge_obj_name
-                     << " stale size:" << src_merge_obj.size_to_release << " total size:" << src_merge_obj.size << dendl;
+  ldpp_dout(dpp, 10) << __func__ << " vacuum merge obj:" << src_merge_obj_name
+                     << " stale size:" << src_merge_obj.size_to_release << " total size:" << src_merge_obj.size << "writing: "<< src_merge_obj.writing << dendl;
 
   if(src_merge_obj.size_to_release == src_merge_obj.size){
     remove_fully_stale_obj(bucket, shard_id, src_merge_obj_name);
@@ -4718,8 +4718,12 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
 
   int total_frags_size = 0;
   for (const auto &item: stale_frags){
+    ceph_assert(item.first == item.second.offset);
     total_frags_size += item.second.size;
   }
+  ldpp_dout(dpp, 20) << __func__ << " vacuum merge obj:" << src_merge_obj_name
+                    << " latest stale size:" << total_frags_size << dendl;
+
   if(total_frags_size == src_merge_obj.size){
     remove_fully_stale_obj(bucket, shard_id, src_merge_obj_name);
     return;
@@ -4765,12 +4769,12 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
 
   // 3. calculate new offsets in dest merge object
   rgw_object_offsets_info new_offsets_info;
-  uint32_t dest_merge_obj_size = 0;
+  uint32_t dest_merge_obj_size1 = 0;
   int prev_off = -1;
   for(auto &item : offsets){
     if(stale_frags.find(item.first) == stale_frags.end()){
-        new_offsets_info.offsets.push_back(rgw_object_offset(dest_merge_obj_size, item.second.size, item.second.obj_name, item.second.index_epoch));
-        dest_merge_obj_size += item.second.size;
+        new_offsets_info.offsets.push_back(rgw_object_offset(dest_merge_obj_size1, item.second.size, item.second.obj_name, item.second.index_epoch));
+        dest_merge_obj_size1 += item.second.size;
     }
 
     if(prev_off != -1){
@@ -4806,7 +4810,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
   }
 
   // 5. move data from src merge obj to dest merge obj
-  dest_merge_obj_size = 0;
+  uint32_t dest_merge_obj_size2 = 0;
   auto iter = offsets.begin();
   while(iter != offsets.end()){
     bufferlist outbl; // contiguous bytes need to reserve to dest
@@ -4837,31 +4841,35 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
         return ;
       }
       ldpp_dout(dpp, 20) << "vacuum thread move "<< len << " bytes from "
-                         << src_merge_obj_name << " to " << dest_merge_obj_name << dendl;
+                         << src_merge_obj_name << ":" << off << " to " << dest_merge_obj_name <<":"<< dest_merge_obj_size2 << dendl;
       // 5.2 write contiguous bytes to dest
       ObjectWriteOperation wop;
-      wop.write(dest_merge_obj_size, outbl);
+      wop.write(dest_merge_obj_size2, outbl);
       r = rgw_rados_operate(dpp, dest_ref.pool.ioctx(), dest_ref.obj.oid, &wop, null_yield);
       if (r < 0) {
         ldpp_dout(dpp, 1) << "failed to write data to : " << dest_merge_obj_name
-                          << " offset:" << dest_merge_obj_size <<  " r:" << r << dendl;
+                          << " offset:" << dest_merge_obj_size2 <<  " r:" << r << dendl;
         return ;
       }
-      dest_merge_obj_size += len;
+      dest_merge_obj_size2 += len;
     }
 
+    // iter now point to end or a stale frag offset
     if(iter != offsets.end()){
+      ldpp_dout(dpp, 20) << "vacuum thread discard "<< iter->second.size << " bytes from "
+                         << src_merge_obj_name << ":" << iter->second.offset << dendl;
       iter++;
     }
   }
-
-  ceph_assert(dest_merge_obj_size + total_frags_size == src_merge_obj.size);
+  ldpp_dout(dpp, 20) << "dest_merge_obj_size1 : "<< dest_merge_obj_size1<< " dest_merge_obj_size2:" << dest_merge_obj_size2 << dendl;
+  ceph_assert(dest_merge_obj_size1 == dest_merge_obj_size2);
+  ceph_assert(dest_merge_obj_size2 + total_frags_size == src_merge_obj.size);
 
   // 6. update shard head merge object stats
   // 7. update merge object name and offset in corresponding object bucket index entry
   // 8. remove stale fragments entries
   rgw_merge_object_stat dest_merge_obj;
-  dest_merge_obj.size = dest_merge_obj_size;
+  dest_merge_obj.size = dest_merge_obj_size2;
   dest_merge_obj.version = src_merge_obj.version+1;
   dest_merge_obj.size_to_release = 0;
   dest_merge_obj.writing = false;
@@ -4889,7 +4897,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
     ldpp_dout(dpp, 1) << "ERROR failed to delete src merge obj :" << src_merge_obj_name << " r: " << r << dendl;
     return;
   }
-  ldpp_dout(dpp, 10) << "INFO: merge object:" << src_merge_obj_name << " vacuumed, release " << src_merge_obj.size - dest_merge_obj_size << " bytes. "<< dendl;
+  ldpp_dout(dpp, 10) << "INFO: merge object:" << src_merge_obj_name << " vacuumed, release " << src_merge_obj.size - dest_merge_obj_size2 << " bytes. "<< dendl;
 }
 
 void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint16_t shard_id, string &src_merge_obj_name){
@@ -6550,14 +6558,6 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     dirent.meta.mtime = mtime;
     dirent.ver.pool = ref.pool.ioctx().get_id();
     dirent.ver.epoch = ref.pool.ioctx().get_last_version();
-
-    if (dirent.meta.inline_head){
-      dirent.meta.inline_head = false;
-      dirent.meta.head_data.clear();
-      dirent.meta.head_data_size =0;
-      dirent.meta.head_attrs.clear();
-    }
-
     encode(dirent, entry_in_trash_bin.data);
     r = store->bi_put(dpp, target->get_bucket_info().bucket, rgw_obj_in_trash, entry_in_trash_bin);
     if (r < 0) {
@@ -6573,6 +6573,35 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     }
 
     return 0;
+}
+
+int RGWRados::Object::Delete::rename_bi_entry_to_trash_bin(const DoutPrefixProvider *dpp){
+  RGWRados *store = target->get_store();
+  rgw_obj& obj = target->get_obj();
+
+  RGWObjState *state;
+  int r = target->get_state(dpp, &state, false, null_yield);
+  if (r < 0)
+    return r;
+  if (!state->exists) {
+    ldpp_dout(dpp, 0) << "ERROR: head did not exist when move to obj (" << state->obj.key.name << ") to trash bin, r:" << r << dendl;
+    target->invalidate_state();
+    return -ENOENT;
+  }
+
+  std::stringstream ss;
+  ss << state->mtime;
+  string dest_name = RGW_TRASH_RESERVATION_PREFIX + obj.key.name + ".CREATED_AT_" + ss.str(); // obj name with create time
+  r = store->bi_rename(dpp, target->get_bucket_info().bucket, obj, obj.key.name, dest_name, state->obj_tag, true);
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "WARNING: failed to rename bi entry (" << obj.key.name << ") in trash bin. r:" << r << dendl;
+    if(r == -ENOENT || r == -ECANCELED){
+      return 0;
+    }
+    return r;
+  }
+
+  return 0;
 }
 
 int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, RGWObjState *state) {
@@ -6622,24 +6651,19 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
     }
   }
 
-  bool update_quota_stats = true;
   if (params.bucket_trash_bin_enabled) {
     /**
-     * the deleting object move to trash , only when:
+     * the delete tiny object move to trash , only when:
      * 1. bucket trash is enabled
      * 2. deleting object is not in trash bin
      * 3. user do not specify del_obj_bypass_trash_bin param
      */
     if (!params.obj_in_bucket_trash_bin && !params.del_obj_bypass_trash_bin){
-      update_quota_stats = false; // if obj move to trash bin, keep quota stats unchanged
-      r =  copy_head_and_bi_to_trash_bin(null_yield, dpp);// copy head and bi entry to trash bin on delete
-      if ( r < 0)
-        return r;
+      return rename_bi_entry_to_trash_bin(dpp);// copy head and bi entry to trash bin on delete
     }
   }
 
   index_op.set_zones_trace(params.zones_trace);
-
   if(params.del_obj_bypass_trash_bin){
     // data sync use this flag
     params.bilog_flags |= RGW_BILOG_FLAG_FORCE_DEL_OP;
@@ -6647,7 +6671,7 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
   index_op.set_bilog_flags(params.bilog_flags);
   index_op.set_op_tag(state->obj_tag.c_str());
 
-  r = index_op.complete_atomic_del(dpp, state->mtime, params.remove_objs, update_quota_stats);
+  r = index_op.complete_atomic_del(dpp, state->mtime, params.remove_objs);
 
   if (r >= 0) {
     tombstone_cache_t *obj_tombstone_cache = target->get_store()->get_tombstone_cache();
@@ -6668,7 +6692,7 @@ int RGWRados::Object::Delete::delete_tiny_object(const DoutPrefixProvider *dpp, 
   }else{
     obj_accounted_size = state->accounted_size;
   }
-  if(obj_accounted_size > 0 && update_quota_stats){
+  if(obj_accounted_size > 0){
     /* update quota cache */
     target->get_store()->quota_handler->update_stats(params.bucket_owner, obj.bucket, -1, 0, obj_accounted_size);
   }
@@ -8336,7 +8360,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_add(const DoutPrefixPro
 
 int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_del(const DoutPrefixProvider *dpp,
                                                              real_time& removed_mtime,
-                                                             list<rgw_obj_index_key> *remove_objs, bool update_quota_stats)
+                                                             list<rgw_obj_index_key> *remove_objs)
 {
   RGWRados *store = target->get_store();
   BucketShard *bs;
@@ -8348,7 +8372,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_del(const DoutPrefixPro
   }
 
   ret = guard_reshard(dpp, nullptr, [&](BucketShard *bs) -> int {
-            return store->cls_obj_complete_del_op_atomic(dpp, *bs, optag, obj, removed_mtime, remove_objs, update_quota_stats,
+            return store->cls_obj_complete_del_op_atomic(dpp, *bs, optag, obj, removed_mtime, remove_objs,
                                                          check_mtime, mtime, high_precision_time, type,
                                                          bilog_flags, zones_trace);
         });
@@ -10541,6 +10565,25 @@ int RGWRados::bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj&
   return bi_put(bs, entry);
 }
 
+int RGWRados::bi_rename(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, string& src_name, string& dest_name,
+                        bufferlist &obj_tag, bool to_trash)
+{
+  BucketShard bs(this);
+
+  int ret = bs.init(bucket, obj, nullptr /* no RGWBucketInfo */, dpp);
+  if (ret < 0) {
+    ldpp_dout(dpp, 5) << "bs.init() returned ret=" << ret << dendl;
+    return ret;
+  }
+
+  auto& ref = bs.bucket_obj.get_ref();
+  ret = cls_rgw_bi_rename(ref.pool.ioctx(), ref.obj.oid, src_name, dest_name, obj_tag, to_trash);
+  if (ret < 0)
+    return ret;
+
+  return 0;
+}
+
 int RGWRados::bi_ent_remove(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace)
 {
     BucketShard bs(this);
@@ -10796,7 +10839,7 @@ int RGWRados::cls_obj_complete_del(BucketShard& bs, string& tag,
 int RGWRados::cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, string& tag,
                                    rgw_obj& obj,
                                    real_time& removed_mtime,
-                                   list<rgw_obj_index_key> *remove_objs, bool update_quota_stats,
+                                   list<rgw_obj_index_key> *remove_objs,
                                    bool check_mtime, real_time mtime, bool high_precision_time, RGWCheckMTimeType check_type,
                                    uint16_t bilog_flags, rgw_zone_set *_zones_trace)
 {
@@ -10835,7 +10878,7 @@ int RGWRados::cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, Buck
   if (remove_objs)
     call.remove_objs = *remove_objs;
   call.zones_trace = zones_trace;
-  call.update_quota_stats = update_quota_stats;
+  call.update_quota_stats = true;
 
   if (check_mtime){
     cls_rgw_obj_check_mtime_bi(o, ent.key,mtime, high_precision_time, check_type);

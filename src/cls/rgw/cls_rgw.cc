@@ -3414,6 +3414,88 @@ static int rgw_bi_put_op(cls_method_context_t hctx, bufferlist *in, bufferlist *
   return 0;
 }
 
+static int rgw_inlined_bi_rename_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+  // decode request
+  rgw_cls_bi_rename_op op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(0, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  cls_rgw_obj_key key;
+  key.name = op.src_name;
+  std::string entry_idx;
+  rgw_bucket_dir_entry entry;
+  int rc = read_key_entry(hctx, key, &entry_idx, &entry);
+  if (rc < 0) {
+    return rc;
+  }
+  if(!entry.meta.inline_head){
+    return -ECANCELED;
+  }
+
+  if(entry.tag != op.obj_tag.c_str()){
+    return -ECANCELED;
+  }
+
+  // 1. rename inlined bi entry
+  if(op.to_trash){
+    bufferlist origin_mtime_bl;
+    encode(entry.meta.mtime, origin_mtime_bl);
+    entry.meta.head_attrs["user.rgw.origin_mtime"] = origin_mtime_bl;
+    entry.meta.mtime = ceph::real_clock::now();
+  }else{
+    bufferlist origin_mtime_bl = entry.meta.head_attrs["user.rgw.origin_mtime"];
+    decode(entry.meta.mtime, origin_mtime_bl);
+    entry.meta.head_attrs.erase("user.rgw.origin_mtime");
+  }
+
+  bufferlist new_entry_bl;
+  encode(entry, new_entry_bl);
+  rc = cls_cxx_map_set_val(hctx, op.dest_name, &new_entry_bl);
+  if (rc < 0)
+    return rc;
+
+  rc = cls_cxx_map_remove_key(hctx, entry_idx);
+  if (rc < 0) {
+    return rc;
+  }
+
+  string src_inlined_index_key;
+  src_inlined_index_key = BI_PREFIX_CHAR;
+  src_inlined_index_key.append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
+  src_inlined_index_key.append(op.src_name);
+
+  bufferlist inlined_entry_idx_val;
+  rc = cls_cxx_map_get_val(hctx, src_inlined_index_key, &inlined_entry_idx_val);
+  if (rc < 0 && rc != -ENOENT) {
+    return rc;
+  }
+  if(rc >= 0){
+    // 2. rename inlined index key if exists
+    string dest_inlined_index_key;
+    dest_inlined_index_key = BI_PREFIX_CHAR;
+    dest_inlined_index_key.append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
+    dest_inlined_index_key.append(op.dest_name);
+    rc = cls_cxx_map_set_val(hctx, dest_inlined_index_key, &inlined_entry_idx_val);
+    if (rc < 0) {
+      return rc;
+    }
+
+    rc = cls_cxx_map_remove_key(hctx, src_inlined_index_key);
+    if (rc < 0) {
+      return rc;
+    }
+  }
+
+  return 0;
+}
+
 static int rgw_bi_ent_remove_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
     CLS_LOG(10, "entered %s()\n", __func__);
@@ -5810,6 +5892,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_bi_get_op;
   cls_method_handle_t h_rgw_bi_get_obj_stat_op;
   cls_method_handle_t h_rgw_bi_put_op;
+  cls_method_handle_t h_rgw_bi_rename_op;
   cls_method_handle_t h_rgw_bi_ent_remove_op;
   cls_method_handle_t h_rgw_bi_list_op;
   cls_method_handle_t h_rgw_bi_log_list_op;
@@ -5877,6 +5960,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BI_GET, CLS_METHOD_RD, rgw_bi_get_op, &h_rgw_bi_get_op);
   cls_register_cxx_method(h_class, RGW_BI_GET_OBJ_STAT, CLS_METHOD_RD, rgw_bi_get_obj_stat_op, &h_rgw_bi_get_obj_stat_op);
   cls_register_cxx_method(h_class, RGW_BI_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_put_op, &h_rgw_bi_put_op);
+  cls_register_cxx_method(h_class, RGW_BI_PUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_inlined_bi_rename_op, &h_rgw_bi_rename_op);
   cls_register_cxx_method(h_class, RGW_BI_ENT_RM, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bi_ent_remove_op, &h_rgw_bi_ent_remove_op);
   cls_register_cxx_method(h_class, RGW_BI_LIST, CLS_METHOD_RD, rgw_bi_list_op, &h_rgw_bi_list_op);
 
