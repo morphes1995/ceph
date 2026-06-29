@@ -887,6 +887,33 @@ struct rgw_cls_bi_put_op {
 };
 WRITE_CLASS_ENCODER(rgw_cls_bi_put_op)
 
+struct rgw_cls_bi_rename_op {
+    string src_name;
+    string dest_name;
+    bufferlist obj_tag;
+    bool to_trash;
+    rgw_cls_bi_rename_op() {}
+
+    void encode(ceph::buffer::list& bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(src_name, bl);
+        encode(dest_name, bl);
+        encode(obj_tag, bl);
+        encode(to_trash, bl);
+      ENCODE_FINISH(bl);
+    }
+
+    void decode(ceph::buffer::list::const_iterator& bl) {
+      DECODE_START(1, bl);
+        decode(src_name, bl);
+        decode(dest_name, bl);
+        decode(obj_tag, bl);
+        decode(to_trash, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_bi_rename_op)
+
 struct rgw_cls_bi_remove_op {
     rgw_cls_bi_entry entry;
     bool log_op;

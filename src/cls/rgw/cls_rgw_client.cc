@@ -583,6 +583,22 @@ void cls_rgw_bi_put(ObjectWriteOperation& op, const string oid, rgw_cls_bi_entry
   op.exec(RGW_CLASS, RGW_BI_PUT, in);
 }
 
+int cls_rgw_bi_rename(librados::IoCtx& io_ctx, const string oid, string& src_name, string& dest_name, bufferlist &obj_tag, bool to_trash)
+{
+  bufferlist in, out;
+  rgw_cls_bi_rename_op call;
+  call.src_name = src_name;
+  call.dest_name = dest_name;
+  call.obj_tag = obj_tag;
+  call.to_trash = to_trash;
+  encode(call, in);
+  int r = io_ctx.exec(oid, RGW_CLASS, RGW_BI_RENAME, in, out);
+  if (r < 0)
+    return r;
+
+  return 0;
+}
+
 int cls_rgw_bi_ent_remove(librados::IoCtx& io_ctx, const string oid, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace)
 {
     bufferlist in, out;

@@ -1365,6 +1365,8 @@ public:
       int delete_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int restore_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
+      int rename_bi_entry_to_trash_bin(const DoutPrefixProvider *dpp);
+      int rename_bi_entry_from_trash_bin(const DoutPrefixProvider *dpp, rgw_obj& trash_obj, bufferlist &trash_obj_tag, rgw_obj& origin_obj);
       bool origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_obj &obj, rgw_raw_obj &raw_obj, optional_yield y);
     };
 
@@ -1525,7 +1527,7 @@ public:
                    list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false);
         int complete_atomic_del(const DoutPrefixProvider *dpp,
                                 real_time& removed_mtime,
-                                list<rgw_obj_index_key> *remove_objs, bool update_quota_stats);
+                                list<rgw_obj_index_key> *remove_objs);
 
       void set_head_attr(const string &name, const bufferlist& v){
         head_attrs.emplace(name, v);
@@ -1963,7 +1965,7 @@ public:
                            ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
   int cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, string& tag, rgw_obj& obj,
-                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, bool update_quota_stats,
+                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs,
                            bool check_mtime, real_time mtime, bool high_precision_time, RGWCheckMTimeType type,
                            uint16_t bilog_flags, rgw_zone_set *zones_trace = nullptr);
   int cls_obj_complete_cancel(BucketShard& bs, std::string& tag, rgw_obj& obj,
@@ -2017,6 +2019,7 @@ public:
   void bi_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry);
+  int bi_rename(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, string& src_name, string& dest_name, bufferlist &obj_tag, bool to_trash);
   int bi_ent_remove(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry, uint16_t bilog_flag, bool log_op, rgw_zone_set *zones_trace);
   int bi_list(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id, const string& filter_obj, const string& marker, uint32_t max, list<rgw_cls_bi_entry> *entries, bool *is_truncated);
   int bi_list(BucketShard& bs, const string& filter_obj, const string& marker, uint32_t max, list<rgw_cls_bi_entry> *entries, bool *is_truncated);

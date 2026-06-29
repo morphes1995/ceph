@@ -5067,6 +5067,15 @@ void RGWDeleteObj::execute(optional_yield y)
           if (!s->object->obj_in_bucket_trash_bin() || restore_obj_from_trash_bin){
               obj_ctx->set_prefetch_data(s->object->get_obj());
           }
+
+          if(s->object->obj_in_bucket_trash_bin()){
+            u_int8_t obj_name_len = s->object->get_key().name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+            if (obj_name_len < 1){
+              ldpp_dout(this, 0) << "ERROR: bad trash bin obj name(" << s->object->get_key().name << ")" << dendl;
+              return;
+            }
+            s->object->set_hash_source(s->object->get_key().name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len));
+          }
       }
 
       op_ret = s->object->get_obj_state(this, obj_ctx, *s->bucket.get(), &astate, s->yield, true);
