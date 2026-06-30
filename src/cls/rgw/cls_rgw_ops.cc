@@ -307,6 +307,7 @@ void rgw_cls_list_op::dump(Formatter *f) const
   f->dump_unsigned("num_entries", num_entries);
   f->dump_string("rgw_instance", rgw_instance);
   f->dump_int("lease_hold_interval_ms", lease_hold_interval_ms);
+  f->dump_string("sc", sc);
 }
 
 void rgw_cls_list_ret::generate_test_instances(list<rgw_cls_list_ret*>& o)
@@ -346,6 +347,7 @@ void rgw_bucket_inlined_entry::dump(Formatter *f) const {
 
 void rgw_cls_clear_inlined_data_op::dump(Formatter *f) const
 {
+  encode_json("sc", sc, f);
   encode_json("merge_obj_name", merge_obj_name, f);
   encode_json("merged_obj_size", merged_obj_size, f);
   encode_json("rgw_merge_object_max_size_mb", rgw_merge_object_max_size_mb, f);

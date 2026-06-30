@@ -964,7 +964,8 @@ static void _parse_name(string &merge_obj_name, int *shard_id, uint32_t *merge_o
   }
 }
 struct rgw_merge_object_stats {
-    std::map<uint16_t, std::map<uint32_t,rgw_merge_object_stat>> stats; // shard_id -> <merge_obj_id, stat>
+    using sc_stats = std::map<uint16_t, std::map<uint32_t,rgw_merge_object_stat>>; // shard_id -> <merge_obj_id, stat>
+    std::map<string , sc_stats> stats; // storage_class -> sc_stats
     rgw_merge_object_stats(){}
 
     void encode(ceph::buffer::list &bl) const {
@@ -979,51 +980,54 @@ struct rgw_merge_object_stats {
     }
     void dump(ceph::Formatter *f) const;
 
-    void add_stale_frag(string &merge_obj_name, uint64_t size, int this_shard){
+    void add_stale_frag(string &sc, string &merge_obj_name, uint64_t size, int this_shard){
       int shard_id;
       uint32_t merge_obj_id;
       int version;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id, &version);
 
-      if (stats[shard_id].find(merge_obj_id) == stats[shard_id].end()){
+      if (stats[sc][shard_id].find(merge_obj_id) == stats[sc][shard_id].end()){
         if(shard_id != this_shard){
-          stats[shard_id][merge_obj_id].writing = false;
-          stats[shard_id][merge_obj_id].version = version;
+          stats[sc][shard_id][merge_obj_id].writing = false;
+          stats[sc][shard_id][merge_obj_id].version = version;
         }
       }
 
-      stats[shard_id][merge_obj_id].size_to_release += size;
+      stats[sc][shard_id][merge_obj_id].size_to_release += size;
     }
 
-    void set_merge_obj(string &merge_obj_name, rgw_merge_object_stat &merge_obj){
+    void set_merge_obj(string &sc, string &merge_obj_name, rgw_merge_object_stat &merge_obj){
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
-      stats[shard_id][merge_obj_id] = merge_obj;
+      stats[sc][shard_id][merge_obj_id] = merge_obj;
     }
 
-    void rm_merge_obj(string &merge_obj_name){
+    void rm_merge_obj(string &sc, string &merge_obj_name){
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
-      stats[shard_id].erase(merge_obj_id);
-      if(stats[shard_id].empty()){
-        stats.erase(shard_id);
+      stats[sc][shard_id].erase(merge_obj_id);
+      if(stats[sc][shard_id].empty()){
+        stats[sc].erase(shard_id);
+      }
+      if(stats[sc].empty()){
+        stats.erase(sc);
       }
     }
 
-    void set_merge_obj_size(string &merge_obj_name, uint32_t size){
+    void set_merge_obj_size(string &sc, string &merge_obj_name, uint32_t size){
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
-      stats[shard_id][merge_obj_id].size = size;
+      stats[sc][shard_id][merge_obj_id].size = size;
     }
 
-    void mark_readonly(string &merge_obj_name){
+    void mark_readonly(string &sc, string &merge_obj_name){
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
-      stats[shard_id][merge_obj_id].writing = false;
+      stats[sc][shard_id][merge_obj_id].writing = false;
     }
 
 };
@@ -1084,10 +1088,10 @@ struct rgw_bucket_dir_header {
   std::string rgw_instance_hold_lease;
   ceph::real_time  acquire_time;
 
-  uint32_t current_merge_obj_id;
+  std::map<string, uint32_t> current_merge_obj_ids;
   rgw_merge_object_stats merge_obj_stats;
 
-  rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false) ,current_merge_obj_id(1){}
+  rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false){}
 
   void encode(ceph::buffer::list &bl) const {
     ENCODE_START(8, 2, bl);
@@ -1100,7 +1104,7 @@ struct rgw_bucket_dir_header {
     encode(syncstopped,bl);
     encode(rgw_instance_hold_lease, bl);
     encode(acquire_time, bl);
-    encode(current_merge_obj_id, bl);
+    encode(current_merge_obj_ids, bl);
     encode(merge_obj_stats, bl);
     ENCODE_FINISH(bl);
   }
@@ -1132,7 +1136,7 @@ struct rgw_bucket_dir_header {
     if (struct_v >= 8){
       decode(rgw_instance_hold_lease, bl);
       decode(acquire_time, bl);
-      decode(current_merge_obj_id, bl);
+      decode(current_merge_obj_ids, bl);
       decode(merge_obj_stats, bl);
     }
     DECODE_FINISH(bl);

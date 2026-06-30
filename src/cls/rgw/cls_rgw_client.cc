@@ -263,10 +263,10 @@ void cls_rgw_bucket_update_stats(librados::ObjectWriteOperation& o,
   o.exec(RGW_CLASS, RGW_BUCKET_UPDATE_STATS, in);
 }
 
-void cls_rgw_bucket_set_merge_obj_stats(librados::ObjectWriteOperation& o, rgw_merge_object_stats &merge_obj_stats, uint32_t current_merge_obj_id){
+void cls_rgw_bucket_set_merge_obj_stats(librados::ObjectWriteOperation& o, rgw_merge_object_stats &merge_obj_stats, std::map<string, uint32_t> &current_merge_obj_ids){
   rgw_cls_bucket_set_merge_obj_stats_op call;
   call.merge_obj_stats = merge_obj_stats;
-  call.current_merge_obj_id = current_merge_obj_id; // shard switch to new merge obj
+  call.current_merge_obj_ids = current_merge_obj_ids; // for each sc, shard switch to new merge obj
   bufferlist in;
   encode(call, in);
   o.exec(RGW_CLASS, RGW_BUCKET_SET_MERGE_OBJ_STATS, in);
@@ -340,12 +340,13 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
 }
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
-                            const cls_rgw_obj_key& start_obj,
+                            const cls_rgw_obj_key& start_obj, string &sc,
                             uint32_t num_entries, string &rgw_instance, int hold_interval,
                             rgw_cls_list_ret* result)
 {
   bufferlist in;
   rgw_cls_list_op call;
+  call.sc = sc;
   call.start_obj = start_obj;
   call.num_entries = num_entries;
   call.rgw_instance = rgw_instance;
@@ -368,9 +369,10 @@ void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,strin
 }
 
 void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries,
-                                                string &merge_obj_name, uint32_t merged_obj_size, uint32_t rgw_merge_object_max_size_mb)
+                                                const string &sc, string &merge_obj_name, uint32_t merged_obj_size, uint32_t rgw_merge_object_max_size_mb)
 {
   rgw_cls_clear_inlined_data_op call;
+  call.sc = sc;
   call.entries = entries;
   call.merge_obj_name = merge_obj_name;
   call.merged_obj_size = merged_obj_size;
@@ -506,11 +508,12 @@ int cls_rgw_bi_get(librados::IoCtx& io_ctx, const string oid,
 }
 
 void cls_rgw_bucket_stale_frags_list_op(librados::ObjectReadOperation& op,
-                            const std::string& merge_obj_name,
+                            string &sc, const std::string& merge_obj_name,
                             rgw_cls_list_stale_frags_ret* result)
 {
   bufferlist in;
   rgw_cls_list_stale_frags_op call;
+  call.storage_class = sc;
   call.merge_obj_name = merge_obj_name;
   encode(call, in);
   op.exec(RGW_CLASS, RGW_LIST_STALE_FRAGS, in,
@@ -884,8 +887,7 @@ int CLSRGWIssueListStaleFrags::issue_op(const int shard_id, const string& oid)
   string empty_delimiter;
 
   librados::ObjectReadOperation op;
-  cls_rgw_bucket_stale_frags_list_op(op,
-                                     merge_obj_name, &result[shard_id]);
+  cls_rgw_bucket_stale_frags_list_op(op, sc, merge_obj_name, &result[shard_id]);
   return manager.aio_operate(io_ctx, shard_id, oid, &op);
 }
 

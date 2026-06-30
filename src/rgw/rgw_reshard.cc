@@ -68,7 +68,7 @@ class BucketReshardShard {
   map<RGWObjCategory, rgw_bucket_category_stats> stats;
 
   rgw_merge_object_stats merge_obj_stats;
-  uint32_t max_merge_obj_id;
+  std::map<string, uint32_t> max_merge_obj_ids; // sc -> max_merge_obj_id
 
   deque<librados::AioCompletion *>& aio_completions;
   uint64_t max_aio_completions;
@@ -110,7 +110,7 @@ public:
                      rgw::sal::RGWRadosStore *_store, const RGWBucketInfo& _bucket_info,
                      int _num_shard, const rgw::bucket_index_layout_generation& _idx_layout,
                      deque<librados::AioCompletion *>& _completions) :
-    store(_store), bucket_info(_bucket_info), idx_layout(_idx_layout), bs(store->getRados()), max_merge_obj_id(0),
+    store(_store), bucket_info(_bucket_info), idx_layout(_idx_layout), bs(store->getRados()),
     aio_completions(_completions)
   {
     num_shard = (idx_layout.layout.normal.num_shards > 0 ? _num_shard : -1);
@@ -149,12 +149,12 @@ public:
     return 0;
   }
 
-  int add_merge_obj_stats(int shard_index, std::map<uint32_t,rgw_merge_object_stat> &stats) {
-    auto &shard_merge_obj_stats = merge_obj_stats.stats[shard_index];
+  int add_merge_obj_stats(string &sc, int shard_index, std::map<uint32_t,rgw_merge_object_stat> &stats) {
+    auto &shard_merge_obj_stats = merge_obj_stats.stats[sc][shard_index];
     for (auto &item: stats){
       if(bs.shard_id == shard_index){
-        if (item.first > max_merge_obj_id){
-          max_merge_obj_id = item.first;
+        if (item.first > max_merge_obj_ids[sc]){
+          max_merge_obj_ids[sc] = item.first;
         }
       }
       shard_merge_obj_stats[item.first].size +=  item.second.size;
@@ -192,8 +192,11 @@ public:
 
   int flush_merge_obj_stats(){
     librados::ObjectWriteOperation op;
-    uint32_t current_merge_obj_id = max_merge_obj_id + 1;
-    cls_rgw_bucket_set_merge_obj_stats(op, merge_obj_stats, current_merge_obj_id);
+    std::map<string, uint32_t> current_merge_obj_ids;
+    for (const auto &item: max_merge_obj_ids){
+      current_merge_obj_ids[item.first] = item.second + 1;
+    }
+    cls_rgw_bucket_set_merge_obj_stats(op, merge_obj_stats, current_merge_obj_ids);
 
     librados::AioCompletion *c;
     int ret = get_completion(&c);
@@ -267,8 +270,8 @@ public:
     return 0;
   }
 
-  void add_merge_obj_stats(int target_shard_id, int origin_shard_id, std::map<uint32_t,rgw_merge_object_stat> &stats){
-    target_shards[target_shard_id]->add_merge_obj_stats(origin_shard_id, stats);
+  void add_merge_obj_stats(string &sc, int target_shard_id, int origin_shard_id, std::map<uint32_t,rgw_merge_object_stat> &stats){
+    target_shards[target_shard_id]->add_merge_obj_stats(sc, origin_shard_id, stats);
   }
 
   int finish() {
@@ -666,11 +669,12 @@ int RGWBucketReshard::do_reshard(int num_shards,
     if (r < 0) {
       return r;
     }
-
-    uint64_t total_merge_obj_stale_frags_size = 0;
-    for (auto& item: headers[0].merge_obj_stats.stats) {
-      int target_shard_index = item.first % num_target_shards;
-      target_shards_mgr.add_merge_obj_stats(target_shard_index, item.first, item.second);
+    for (auto& sc: headers[0].merge_obj_stats.stats) {
+      string sc_name = sc.first;
+      for (auto& item: sc.second) {
+        int target_shard_index = item.first % num_target_shards;
+        target_shards_mgr.add_merge_obj_stats(sc_name, target_shard_index, item.first, item.second);
+      }
     }
 
     while (is_truncated) {

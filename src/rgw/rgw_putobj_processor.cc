@@ -229,7 +229,7 @@ int AtomicObjectProcessor::prepare(optional_yield y)
     }
   }
 
-  if (same_pool) {
+  if (same_pool || bucket->is_tiny_obj_inline_enabled()) {
     head_max_size = max_head_chunk_size;
     chunk_size = max_head_chunk_size;
   }

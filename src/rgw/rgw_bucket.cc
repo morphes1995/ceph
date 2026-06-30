@@ -1622,9 +1622,11 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
   formatter->dump_int("inlined_obj_max_size_mb", bucket_info.inlined_obj_max_size_mb);
 
   uint64_t total_merge_obj_stale_frags_size = 0;
-  for (const auto& pair: merge_objects_stale_frags.stats) {
-    for (const auto& iter: pair.second) {
-      total_merge_obj_stale_frags_size += iter.second.size_to_release;
+  for (const auto& sc: merge_objects_stale_frags.stats) {
+    for (const auto& shard: sc.second) {
+      for (const auto& stat: shard.second) {
+        total_merge_obj_stale_frags_size += stat.second.size_to_release;
+      }
     }
   }
   formatter->dump_int("total_merge_obj_stale_frags_size", total_merge_obj_stale_frags_size);

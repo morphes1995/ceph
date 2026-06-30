@@ -345,7 +345,7 @@ void cls_rgw_bucket_update_stats(librados::ObjectWriteOperation& o,
                                  bool absolute,
                                  const std::map<RGWObjCategory, rgw_bucket_category_stats>& stats);
 
-void cls_rgw_bucket_set_merge_obj_stats(librados::ObjectWriteOperation& o, rgw_merge_object_stats &merge_obj_stats, uint32_t current_merge_obj_id);
+void cls_rgw_bucket_set_merge_obj_stats(librados::ObjectWriteOperation& o, rgw_merge_object_stats &merge_obj_stats, std::map<string, uint32_t> &current_merge_obj_ids);
 
 void cls_rgw_bucket_prepare_op(librados::ObjectWriteOperation& o, RGWModifyOp op, std::string& tag,
                                const cls_rgw_obj_key& key, const std::string& locator, bool log_op,
@@ -465,14 +465,14 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
                             rgw_cls_list_ret* result);
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
-                                          const cls_rgw_obj_key& start_obj,
+                                          const cls_rgw_obj_key& start_obj, string &sc,
                                           uint32_t num_entries, string &rgw_instance, int hold_interval,
                                           rgw_cls_list_ret* result);
 
 void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance, int lease_hold_interval);
 
-void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op,
-                                                list<rgw_bucket_inlined_entry> &entries, string &merge_obj_name, uint32_t merged_obj_size, uint32_t rgw_merge_object_max_size_mb);
+void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries,
+                                                const string &sc, string &merge_obj_name, uint32_t merged_obj_size, uint32_t rgw_merge_object_max_size_mb);
 
 void cls_rgw_bilog_list(librados::ObjectReadOperation& op,
                         const std::string& marker, uint32_t max,
@@ -556,14 +556,16 @@ public:
 };
 
 class CLSRGWIssueListStaleFrags : public CLSRGWConcurrentIO {
-    string &merge_obj_name;
+    string sc;
+    string merge_obj_name;
     map<int, rgw_cls_list_stale_frags_ret> &result;
 protected:
     int issue_op(int shard_id, const std::string& oid) override;
 public:
-    CLSRGWIssueListStaleFrags(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, map<int, rgw_cls_list_stale_frags_ret> &list_results, string &_merge_obj_name,
-                            uint32_t max_aio) :
-            CLSRGWConcurrentIO(io_ctx, oids, max_aio), merge_obj_name(_merge_obj_name), result(list_results) {}
+    CLSRGWIssueListStaleFrags(librados::IoCtx& io_ctx, std::map<int, std::string>& oids, map<int, rgw_cls_list_stale_frags_ret> &list_results,
+                              string &_sc, string &_merge_obj_name,
+                              uint32_t max_aio) :
+            CLSRGWConcurrentIO(io_ctx, oids, max_aio), sc(_sc), merge_obj_name(_merge_obj_name), result(list_results) {}
 };
 
 class CLSRGWIssueFinishVacuum : public CLSRGWConcurrentIO {

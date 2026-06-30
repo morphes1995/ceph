@@ -398,6 +398,7 @@ struct rgw_cls_list_op
   std::string delimiter;
   std::string rgw_instance;
   int lease_hold_interval_ms;
+  string sc;
 
   rgw_cls_list_op() : num_entries(0), list_versions(false){}
 
@@ -410,6 +411,7 @@ struct rgw_cls_list_op
     encode(delimiter, bl);
     encode(rgw_instance, bl);
     encode(lease_hold_interval_ms, bl);
+    encode(sc, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -434,6 +436,7 @@ struct rgw_cls_list_op
     if(struct_v >= 7){
       decode(rgw_instance, bl);
       decode(lease_hold_interval_ms, bl);
+      decode(sc, bl);
     }
     DECODE_FINISH(bl);
   }
@@ -452,6 +455,8 @@ struct rgw_cls_list_ret {
   // at least move the ball foward
   cls_rgw_obj_key marker;
 
+  string marker_sc;
+
   // cls_filtered is not transmitted; it is assumed true for versions
   // on/after 3 and false for prior versions; this allows the rgw
   // layer to know when an older osd (cls) does not do the filtering
@@ -463,19 +468,23 @@ struct rgw_cls_list_ret {
   {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(4, 2, bl);
+    ENCODE_START(5, 2, bl);
     encode(dir, bl);
     encode(is_truncated, bl);
     encode(marker, bl);
+    encode(marker_sc, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(4, 2, 2, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(5, 2, 2, bl);
     decode(dir, bl);
     decode(is_truncated, bl);
     cls_filtered = struct_v >= 3;
     if (struct_v >= 4) {
       decode(marker, bl);
+    }
+    if (struct_v >= 5) {
+      decode(marker_sc, bl);
     }
     DECODE_FINISH(bl);
   }
@@ -518,6 +527,7 @@ struct rgw_bucket_inlined_entry {
 WRITE_CLASS_ENCODER(rgw_bucket_inlined_entry)
 
 struct rgw_cls_clear_inlined_data_op {
+    string sc;
     string merge_obj_name;
     uint32_t merged_obj_size;
     uint32_t rgw_merge_object_max_size_mb;
@@ -525,6 +535,7 @@ struct rgw_cls_clear_inlined_data_op {
 
     void encode(ceph::buffer::list &bl) const {
       ENCODE_START(1, 1, bl);
+        encode(sc, bl);
         encode(merge_obj_name, bl);
         encode(merged_obj_size, bl);
         encode(rgw_merge_object_max_size_mb, bl);
@@ -533,6 +544,7 @@ struct rgw_cls_clear_inlined_data_op {
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
       DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(sc, bl);
         decode(merge_obj_name, bl);
         decode(merged_obj_size, bl);
         decode(rgw_merge_object_max_size_mb, bl);
@@ -594,19 +606,19 @@ WRITE_CLASS_ENCODER(rgw_cls_bucket_update_stats_op)
 struct rgw_cls_bucket_set_merge_obj_stats_op
 {
     rgw_merge_object_stats merge_obj_stats;
-    uint32_t  current_merge_obj_id;
+    map<string, uint32_t> current_merge_obj_ids;
     rgw_cls_bucket_set_merge_obj_stats_op() {}
 
     void encode(ceph::buffer::list &bl) const {
     ENCODE_START(1, 1, bl);
       encode(merge_obj_stats, bl);
-      encode(current_merge_obj_id, bl);
+      encode(current_merge_obj_ids, bl);
     ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
     DECODE_START(1, bl);
       decode(merge_obj_stats, bl);
-      decode(current_merge_obj_id, bl);
+      decode(current_merge_obj_ids, bl);
     DECODE_FINISH(bl);
     }
 };
@@ -770,17 +782,20 @@ struct rgw_cls_bi_get_ret {
 WRITE_CLASS_ENCODER(rgw_cls_bi_get_ret)
 
 struct rgw_cls_list_stale_frags_op {
+    string storage_class;
     string merge_obj_name;
     rgw_cls_list_stale_frags_op() {}
 
     void encode(ceph::buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
+        encode(storage_class, bl);
         encode(merge_obj_name, bl);
       ENCODE_FINISH(bl);
     }
 
     void decode(ceph::buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
+        decode(storage_class, bl);
         decode(merge_obj_name, bl);
       DECODE_FINISH(bl);
     }
@@ -809,6 +824,7 @@ struct rgw_cls_list_stale_frags_ret {
 WRITE_CLASS_ENCODER(rgw_cls_list_stale_frags_ret)
 
 struct rgw_cls_finish_vacuum_op {
+    string storage_class;
     string src_merge_obj_name;
     string dest_merge_obj_name;
     rgw_merge_object_stat new_merge_obj;
@@ -818,6 +834,7 @@ struct rgw_cls_finish_vacuum_op {
 
     void encode(ceph::buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
+        encode(storage_class, bl);
         encode(src_merge_obj_name, bl);
         encode(dest_merge_obj_name, bl);
         encode(new_merge_obj, bl);
@@ -828,6 +845,7 @@ struct rgw_cls_finish_vacuum_op {
 
     void decode(ceph::buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
+        decode(storage_class, bl);
         decode(src_merge_obj_name, bl);
         decode(dest_merge_obj_name, bl);
         decode(new_merge_obj, bl);

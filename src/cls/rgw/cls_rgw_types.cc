@@ -734,7 +734,17 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
   f->dump_string("rgw_instance_hold_lease", rgw_instance_hold_lease);
   utime_t ut(acquire_time);
   encode_json("acquire_time", ut, f);
-  f->dump_int("current_merge_obj_id", current_merge_obj_id);
+
+  f->open_array_section("current_merge_obj_ids");
+  if (current_merge_obj_ids.size() > 0) {
+    for (auto it = current_merge_obj_ids.begin(); it != current_merge_obj_ids.end(); it++) {
+      f->open_object_section("sc");
+      f->dump_string("sc_name", it->first.c_str());
+      f->dump_unsigned("current_merge_obj_id", it->second);
+      f->close_section();
+    }
+  }
+  f->close_section();
 
   merge_obj_stats.dump(f);
 }
@@ -746,17 +756,42 @@ void rgw_merge_object_stat::dump(Formatter *f) const {
   f->dump_bool("writing", writing);
 }
 
+//void rgw_merge_object_stats::dump(Formatter *f) const {
+//  f->open_array_section("merge_obj_stale_frags_stats");
+//  for (auto iter = stats.begin(); iter != stats.end(); ++iter) {
+//    f->open_object_section("shard");
+//    f->dump_int("shard", int(iter->first));
+//    for (auto iter2 = iter->second.begin(); iter2 != iter->second.end(); ++iter2) {
+//      f->open_object_section("merge_object");
+//      f->dump_int("merge_object_id", int(iter2->first));
+//      iter2->second.dump(f);
+//      f->close_section();
+//    }
+//    f->close_section();
+//  }
+//  f->close_section();
+//}
+
 void rgw_merge_object_stats::dump(Formatter *f) const {
   f->open_array_section("merge_obj_stale_frags_stats");
   for (auto iter = stats.begin(); iter != stats.end(); ++iter) {
-    f->open_object_section("shard");
-    f->dump_int("shard", int(iter->first));
+    f->open_object_section("storage class");
+    f->dump_string("sc", iter->first);
+    f->open_array_section("shards");
     for (auto iter2 = iter->second.begin(); iter2 != iter->second.end(); ++iter2) {
-      f->open_object_section("merge_object");
-      f->dump_int("merge_object_id", int(iter2->first));
-      iter2->second.dump(f);
+      f->open_object_section("shard");
+      f->dump_int("shard", int(iter2->first));
+      f->open_array_section("objs");
+      for (auto iter3 = iter2->second.begin(); iter3 != iter2->second.end(); ++iter3) {
+        f->open_object_section("merge_object");
+        f->dump_int("merge_object_id", int(iter3->first));
+        iter3->second.dump(f);
+        f->close_section();
+      }
+      f->close_section();
       f->close_section();
     }
+    f->close_section();
     f->close_section();
   }
   f->close_section();

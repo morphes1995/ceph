@@ -588,10 +588,11 @@ public:
 private:
     dequeue_result dequeue();
     void* entry() override;
-    void batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_name);
+    void batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
     int try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent);
-    int _merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
-                                      list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, uint32_t *merged_obj_size);
+    int _merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
+                             list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, const string &sc,
+                             /* out params */string *merge_obj_name, uint32_t *merged_obj_size);
 };
 
 
@@ -782,8 +783,8 @@ public:
     int detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule, std::string &rgw_instance);
     void try_disable_object_inline(string &bucket_id);
     int vacuum_bucket(string &bucket_id, utime_t &start);
-    void vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj);
-    void remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint16_t shard_id, string &src_merge_obj_name);
+    void vacuum_object(rgw::sal::RGWBucket *bucket, string &sc, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj);
+    void remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, string &sc, uint16_t shard_id, string &src_merge_obj_name);
 
     int set_entry(rgw_bucket &bucket, bool disabling);
     int set_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec);
@@ -2012,10 +2013,12 @@ public:
   int bi_get_instance(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_dir_entry *dirent);
   int bi_get_olh(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_bucket_olh_entry *olh);
   int bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw_obj& obj, BIIndexType index_type, rgw_cls_bi_entry *entry);
-  int list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, string &merge_obj_name,
-                                   map<uint32_t, rgw_merge_obj_stale_frag> &result);
+  int list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+                       string &sc, string &merge_obj_name,
+                       map<uint32_t, rgw_merge_obj_stale_frag> &result);
   int finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
-                              int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name, rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info);
+                              string &sc, int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name,
+                              rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info);
   void bi_put(librados::ObjectWriteOperation& op, BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(BucketShard& bs, rgw_cls_bi_entry& entry);
   int bi_put(const DoutPrefixProvider *dpp, rgw_bucket& bucket, rgw_obj& obj, rgw_cls_bi_entry& entry);

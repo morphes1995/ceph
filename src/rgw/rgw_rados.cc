@@ -4110,12 +4110,13 @@ void *DCWorkQ::entry() {
     int hold_interval = wk->ctx()->_conf->rgw_detach_lease_hold_interval_ms;
     bool truncated = true;
     cls_rgw_obj_key start_obj;
+    string sc;
     while (truncated) {
       rgw_cls_list_ret result;
       librados::ObjectReadOperation op;
       cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
       auto before_list = ceph_clock_now();
-      cls_rgw_bucket_inlined_entry_list_op(op, start_obj,
+      cls_rgw_bucket_inlined_entry_list_op(op, start_obj,sc,
                                            num_entries, shardItem.rgw_instance, hold_interval, &result);
       r = rgw_rados_operate(dpp, ioctx, oid, &op, nullptr, null_yield);
       if(r == -ECANCELED){
@@ -4145,10 +4146,20 @@ void *DCWorkQ::entry() {
 
       truncated = result.is_truncated;
       start_obj = result.marker;
+      sc = result.marker_sc;
+
       ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance
                         << " read [" << result.dir.m.size() <<"] entries from shard " << shardItem.oid  <<dendl;
-      string merge_obj_name = "evoc.merged.big.obj_" + to_string(shardItem.shard_id) + "_" + to_string(result.dir.header.current_merge_obj_id) + "_0";
-      batch_detach_and_merge(shardItem, result.dir.m, merge_obj_name);
+
+      map<string, list<rgw_bucket_dir_entry>> entries_grouped_by_sc;
+      for (auto &entry: result.dir.m) {
+        rgw_bucket_dir_entry &dirent = entry.second;
+        entries_grouped_by_sc[dirent.meta.storage_class].push_back(dirent);
+      }
+
+      for (auto &item: entries_grouped_by_sc){
+        batch_detach_and_merge(shardItem, result.dir, item.first, item.second);
+      }
     } // listed all shard inlined objects
 
   }// going done while
@@ -4270,10 +4281,8 @@ int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &di
   return r;
 }
 
-void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::flat_map<std::string, rgw_bucket_dir_entry> entries, string &merge_obj_name){
-  list<rgw_bucket_dir_entry> entries_to_merge;
-  for (auto &entry: entries) {
-    rgw_bucket_dir_entry &dirent = entry.second;
+void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge){
+  for (auto &dirent: entries_to_merge) {
     ceph_assert(dirent.meta.inline_head);
     if(dirent.may_have_stale_head){
       int r = try_clear_stale_head(shardItem, dirent);
@@ -4281,15 +4290,14 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::fla
         continue;
       }
     }
-
-    entries_to_merge.push_back(entry.second);
   }
   int r = 0;
   uint32_t merged_obj_size = 0;
   list<rgw_bucket_inlined_entry> entries_merged;
   if(!entries_to_merge.empty()){
     auto before_merge = ceph_clock_now();
-    r = _merge_heads_payload(shardItem, merge_obj_name, entries_to_merge, entries_merged, &merged_obj_size);
+    string merge_obj_name;
+    r = _merge_heads_payload(shardItem, dir, entries_to_merge, entries_merged, sc, &merge_obj_name, &merged_obj_size);
     ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << "  merge heads data of bucket: " << shardItem.bucket.name
                        << " shard:" << shardItem.oid << " obj cnt " << entries_to_merge.size() << " r:" << r <<dendl;
     if (r < 0){
@@ -4304,7 +4312,7 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::fla
     string oid = shardItem.oid;
     librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
     cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
-    cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_merged, merge_obj_name, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
+    cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_merged, sc, merge_obj_name, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
     if(async_clear){
       clear_op_data *entry = new clear_op_data();
       entry->dpp = dpp;
@@ -4322,10 +4330,12 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, boost::container::fla
   }
 }
 
-int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
-                                  list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, uint32_t *merged_obj_size){
+int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
+                                  list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, const string &sc,
+                                  /* out params */string *merge_obj_name, uint32_t *merged_obj_size){
   bufferlist merged_bl;
   for(auto entry: entries_to_detach){
+    ceph_assert(sc == entry.meta.storage_class);
     int offset = merged_bl.length();
     ceph_assert(entry.meta.head_data.length() == entry.meta.head_data_size);
     merged_bl.append(entry.meta.head_data);
@@ -4339,9 +4349,11 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, string &merge_obj_name,
     entries_merged.emplace_back(d);
   }
 
+  (*merge_obj_name) = "evoc.merged.big.obj_" + to_string(shardItem.shard_id) + "_" + to_string(dir.header.current_merge_obj_ids[sc]) + "_0";
   rgw::sal::RGWRadosStore *store = get_store();
-  rgw_obj merge_obj(shardItem.bucket, merge_obj_name);
+  rgw_obj merge_obj(shardItem.bucket, *merge_obj_name);
   rgw_rados_ref ref;
+  shardItem.placement_rule.storage_class = sc;
   int r = store->getRados()->get_obj_head_ref(dpp, shardItem.placement_rule, merge_obj, &ref);
   if (r < 0){
     ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get merge rgw_rados_ref failed obj :" << merge_obj_name << " r: " << r << dendl;
@@ -4678,20 +4690,23 @@ int RGWRadosDetacher::vacuum_bucket(string &bucket_id, utime_t &start){
   }
 
   double threshold = cct->_conf->rgw_vacuum_threshold_pct;
-  for(auto &shard: merge_objects_stale_frags.stats){
-    uint16_t shard_id = shard.first;
-    for(const auto &obj: shard.second){
-      uint32_t merge_obj_id = obj.first;
-      const rgw_merge_object_stat &merge_obj = obj.second;
-      if (!merge_obj.writing && double(merge_obj.size_to_release) / double(merge_obj.size) >= threshold ){
-        vacuum_object(bucket.get(), shard_id, merge_obj_id, merge_obj);
+  for(auto &sc: merge_objects_stale_frags.stats){
+    string storage_class = sc.first;
+    for(auto &shard: sc.second){
+      uint16_t shard_id = shard.first;
+      for(const auto &obj: shard.second){
+        uint32_t merge_obj_id = obj.first;
+        const rgw_merge_object_stat &merge_obj = obj.second;
+        if (!merge_obj.writing && double(merge_obj.size_to_release) / double(merge_obj.size) >= threshold ){
+          vacuum_object(bucket.get(), storage_class, shard_id, merge_obj_id, merge_obj);
 
-        utime_t now = ceph_clock_now();
-        if( (now.to_msec() - start.to_msec()) >= (cct->_conf->rgw_vacuum_process_period_sec * 1000) / 2){
-          return -ECANCELED; // we processed to many merge object
-        }
-        if (going_down()){
-          return -ECANCELED;
+          utime_t now = ceph_clock_now();
+          if( (now.to_msec() - start.to_msec()) >= (cct->_conf->rgw_vacuum_process_period_sec * 1000) / 2){
+            return -ECANCELED; // we processed to many merge object
+          }
+          if (going_down()){
+            return -ECANCELED;
+          }
         }
       }
     }
@@ -4701,20 +4716,20 @@ int RGWRadosDetacher::vacuum_bucket(string &bucket_id, utime_t &start){
 
 // during the method execution, deletion related to src_merge_obj may occur simultaneously,
 // so extra stale frags may be generated
-void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj){
+void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, string &sc, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj){
   string src_merge_obj_name = "evoc.merged.big.obj_" + to_string(shard_id)
                               + "_" + to_string(merge_obj_id) + "_" +to_string(src_merge_obj.version);
-  ldpp_dout(dpp, 10) << __func__ << " vacuum merge obj:" << src_merge_obj_name
+  ldpp_dout(dpp, 10) << __func__ << " vacuum merge obj:" << src_merge_obj_name << "sc: " << sc
                      << " stale size:" << src_merge_obj.size_to_release << " total size:" << src_merge_obj.size << "writing: "<< src_merge_obj.writing << dendl;
 
   if(src_merge_obj.size_to_release == src_merge_obj.size){
-    remove_fully_stale_obj(bucket, shard_id, src_merge_obj_name);
+    remove_fully_stale_obj(bucket, sc, shard_id, src_merge_obj_name);
     return;
   }
 
   // 1. read merge obj stale frags from all shards;
   map<uint32_t, rgw_merge_obj_stale_frag> stale_frags;
-  int r = store->getRados()->list_stale_frags(dpp, bucket->get_info(), src_merge_obj_name, stale_frags);
+  int r = store->getRados()->list_stale_frags(dpp, bucket->get_info(), sc, src_merge_obj_name, stale_frags);
   if (r < 0){
     return;
   }
@@ -4729,14 +4744,16 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
                     << " latest stale size:" << total_frags_size << dendl;
 
   if(total_frags_size == src_merge_obj.size){
-    remove_fully_stale_obj(bucket, shard_id, src_merge_obj_name);
+    remove_fully_stale_obj(bucket, sc, shard_id, src_merge_obj_name);
     return;
   }
 
   // 2. read merge obj offsets
   rgw_raw_obj raw_merge_obj;
   rgw_obj rgw_merge_obj(bucket->get_info().bucket, src_merge_obj_name);
-  store->get_raw_obj(bucket->get_info().placement_rule, rgw_merge_obj, &raw_merge_obj);
+  rgw_placement_rule rule = bucket->get_info().placement_rule;
+  rule.storage_class = sc;
+  store->get_raw_obj(rule, rgw_merge_obj, &raw_merge_obj);
   rgw_rados_ref ref;
   r = store->getRados()->get_raw_obj_ref(dpp, raw_merge_obj, &ref);
   if (r < 0) {
@@ -4799,7 +4816,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
                                + "_" + to_string(merge_obj_id) + "_" +to_string(src_merge_obj.version+1);
   rgw_raw_obj dest_raw_merge_obj;
   rgw_obj dest_rgw_merge_obj(bucket->get_info().bucket, dest_merge_obj_name);
-  store->get_raw_obj(bucket->get_info().placement_rule, dest_rgw_merge_obj, &dest_raw_merge_obj);
+  store->get_raw_obj(rule, dest_rgw_merge_obj, &dest_raw_merge_obj);
   rgw_rados_ref dest_ref;
   r = store->getRados()->get_raw_obj_ref(dpp, dest_raw_merge_obj, &dest_ref);
   if (r < 0) {
@@ -4902,7 +4919,7 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
   dest_merge_obj.size_to_release = 0;
   dest_merge_obj.writing = false;
 
-  r = store->getRados()->finish_vacuum(dpp, bucket->get_info(), shard_id, src_merge_obj_name, dest_merge_obj_name, dest_merge_obj, new_offsets_info);
+  r = store->getRados()->finish_vacuum(dpp, bucket->get_info(), sc, shard_id, src_merge_obj_name, dest_merge_obj_name, dest_merge_obj, new_offsets_info);
   if (r < 0) {
     ldpp_dout(dpp, 1) << "vacuum finish failed : "<<  " r:" << r << dendl;
     ObjectWriteOperation del_op;
@@ -4928,13 +4945,13 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, uint16_t shard
   ldpp_dout(dpp, 10) << "INFO: merge object:" << src_merge_obj_name << " vacuumed, release " << src_merge_obj.size - dest_merge_obj_size2 << " bytes. "<< dendl;
 }
 
-void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint16_t shard_id, string &src_merge_obj_name){
+void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, string &sc, uint16_t shard_id, string &src_merge_obj_name){
   rgw_merge_object_stat dummy_obj;
   rgw_object_offsets_info dummy_offsets_info;
   string dummy_dest_merge_obj_name = "";
   // update shard head stats
   // remove stale fragments entries
-  int r = store->getRados()->finish_vacuum(dpp, bucket->get_info(), shard_id, src_merge_obj_name, dummy_dest_merge_obj_name, dummy_obj, dummy_offsets_info);
+  int r = store->getRados()->finish_vacuum(dpp, bucket->get_info(), sc, shard_id, src_merge_obj_name, dummy_dest_merge_obj_name, dummy_obj, dummy_offsets_info);
   if (r < 0) {
     ldpp_dout(dpp, 1) << __func__ << "vacuum finish failed : "<<  " r:" << r << dendl;
     return ;
@@ -4942,7 +4959,9 @@ void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, uint1
 
   rgw_raw_obj raw_merge_obj;
   rgw_obj rgw_merge_obj(bucket->get_info().bucket, src_merge_obj_name);
-  store->get_raw_obj(bucket->get_info().placement_rule, rgw_merge_obj, &raw_merge_obj);
+  rgw_placement_rule rule = bucket->get_info().placement_rule;
+  rule.storage_class = sc;
+  store->get_raw_obj(rule, rgw_merge_obj, &raw_merge_obj);
   rgw_rados_ref ref;
   r = store->getRados()->get_raw_obj_ref(dpp, raw_merge_obj, &ref);
   if (r < 0) {
@@ -6352,24 +6371,28 @@ static void accumulate_raw_stats(const rgw_bucket_dir_header& header,
 static void accumulate_stale_frags(const rgw_bucket_dir_header& header,
                                        rgw_merge_object_stats *merge_objects_stale_frags)
 {
-  for (auto& shard: header.merge_obj_stats.stats) {
-    std::map<uint32_t,rgw_merge_object_stat> &shard_stats = merge_objects_stale_frags->stats[shard.first];
-    for (auto &item: shard.second){
-      bool exist = shard_stats.find(item.first) != shard_stats.end();
-      if(exist){
-        ceph_assert(shard_stats[item.first].version == item.second.version);
-        ceph_assert(!item.second.writing);
-      }
-      if (shard_stats.find(item.first) == shard_stats.end()){
-        shard_stats[item.first] = rgw_merge_object_stat();
-        shard_stats[item.first].writing = false;
-      }
-      rgw_merge_object_stat &stat = shard_stats[item.first];
-      stat.version = item.second.version;
-      stat.size += item.second.size;
-      stat.size_to_release += item.second.size_to_release;
-      if(item.second.writing){
-        stat.writing = true;
+  using sc_stats_type = std::map<uint16_t, std::map<uint32_t,rgw_merge_object_stat>>; // shard_id -> <merge_obj_id, stat>
+  for (auto& sc: header.merge_obj_stats.stats) {
+    sc_stats_type &sc_stats = merge_objects_stale_frags->stats[sc.first];
+    for (auto& shard: sc.second) {
+      std::map<uint32_t,rgw_merge_object_stat> &shard_stats = sc_stats[shard.first];
+      for (auto &item: shard.second){
+        bool exist = shard_stats.find(item.first) != shard_stats.end();
+        if(exist){
+          ceph_assert(shard_stats[item.first].version == item.second.version);
+          ceph_assert(!item.second.writing);
+        }
+        if (shard_stats.find(item.first) == shard_stats.end()){
+          shard_stats[item.first] = rgw_merge_object_stat();
+          shard_stats[item.first].writing = false;
+        }
+        rgw_merge_object_stat &stat = shard_stats[item.first];
+        stat.version = item.second.version;
+        stat.size += item.second.size;
+        stat.size_to_release += item.second.size_to_release;
+        if(item.second.writing){
+          stat.writing = true;
+        }
       }
     }
   }
@@ -8739,7 +8762,9 @@ int RGWRados::iterate_obj(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx,
 
   if(!astate->merge_obj_name.empty()){
     rgw_obj merge_obj(bucket_info.bucket, astate->merge_obj_name);
-    obj_to_raw(bucket_info.placement_rule, merge_obj, &raw_merge_obj);
+    rgw_placement_rule rule = bucket_info.placement_rule;
+    rule.storage_class = astate->manifest->get_tail_placement().placement_rule.storage_class;
+    obj_to_raw(rule, merge_obj, &raw_merge_obj);
   }
 
   if (end < 0)
@@ -10516,7 +10541,8 @@ int RGWRados::bi_get(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_
   return cls_rgw_bi_get(ref.pool.ioctx(), ref.obj.oid, index_type, key, entry);
 }
 
-int RGWRados::list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, string &merge_obj_name,
+int RGWRados::list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+                               string &sc, string &merge_obj_name,
                                 map<uint32_t, rgw_merge_obj_stale_frag> &result)
 {
   RGWSI_RADOS::Pool index_pool;
@@ -10532,7 +10558,7 @@ int RGWRados::list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInf
   for (const auto &item: oids){
     list_result[item.first] = rgw_cls_list_stale_frags_ret();
   }
-  r = CLSRGWIssueListStaleFrags(index_pool.ioctx(), oids, list_result, merge_obj_name, cct->_conf->rgw_bucket_index_max_aio)();
+  r = CLSRGWIssueListStaleFrags(index_pool.ioctx(), oids, list_result, sc, merge_obj_name, cct->_conf->rgw_bucket_index_max_aio)();
   if (r < 0) {
     ldpp_dout(dpp, 20) << "cls_bucket_head: CLSRGWIssueListStaleFrags() returned "
                        << r << dendl;
@@ -10550,7 +10576,7 @@ int RGWRados::list_stale_frags(const DoutPrefixProvider *dpp, const RGWBucketInf
 }
 
 int RGWRados::finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
-                               int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name,
+                            string &sc, int shard_id, string &src_merge_obj_name, string &dest_merge_obj_name,
                             rgw_merge_object_stat &dest_merge_obj, rgw_object_offsets_info &new_offsets_info)
 {
   RGWSI_RADOS::Pool index_pool;
@@ -10565,6 +10591,7 @@ int RGWRados::finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& 
   std::map<int, rgw_cls_finish_vacuum_op> ops;
   for (const auto &obj: bucket_objs){
     rgw_cls_finish_vacuum_op op;
+    op.storage_class = sc;
     op.src_merge_obj_name = src_merge_obj_name;
     op.dest_merge_obj_name = dest_merge_obj_name;
     op.new_merge_obj = dest_merge_obj;
