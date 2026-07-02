@@ -139,6 +139,35 @@ int RGWRadosBucket::remove_bucket(const DoutPrefixProvider *dpp,
   (void) store->getRados()->get_lc()->remove_bucket_config(
     this->info, get_attrs());
 
+  // read bucket stats
+  string bucket_ver;
+  string master_ver;
+  map<RGWObjCategory, RGWStorageStats> bucket_stats;
+  rgw_merge_object_stats merge_objects_stale_frags;
+  ret = store->getRados()->get_bucket_stats(dpp, info, RGW_NO_SHARD, &bucket_ver,
+                                            &master_ver, bucket_stats, &merge_objects_stale_frags, nullptr);
+  for(auto &sc: merge_objects_stale_frags.stats){
+    string storage_class = sc.first;
+    for(auto &shard: sc.second){
+      uint16_t shard_id = shard.first;
+      for(const auto &obj: shard.second){
+        uint32_t merge_obj_id = obj.first;
+        const rgw_merge_object_stat &merge_obj = obj.second;
+        string merge_obj_name = "evoc.merged.big.obj_" + std::to_string(shard_id)
+                                + "_" + std::to_string(merge_obj_id) + "_" + std::to_string(merge_obj.version);
+        int ret = store->getRados()->delete_merge_object(dpp, info, storage_class, merge_obj_name);
+        if(ret <0){
+          ldout(store->ctx(), 1) << "WARNING: failed delete merge obj" << merge_obj_name
+                                 << " before bucket " << info.bucket.name <<  "delete. ret=" <<  ret << dendl;
+        }
+      }
+    }
+  }
+  ret = store->getRados()->get_dc()->rm_entry(info.bucket);
+  if(ret < 0 && ret != -ENOENT){
+    ldout(store->ctx(), 1) << "WARNING: failed delete inlined entry before bucket " << info.bucket.name <<  " delete. ret=" <<  ret << dendl;
+  }
+
   ret = store->ctl()->bucket->sync_user_stats(dpp, info.owner, info, y);
   if (ret < 0) {
      ldout(store->ctx(), 1) << "WARNING: failed sync user stats before bucket delete. ret=" <<  ret << dendl;

@@ -6183,6 +6183,27 @@ int RGWRados::delete_bucket(RGWBucketInfo& bucket_info, RGWObjVersionTracker& ob
   return 0;
 }
 
+int RGWRados::delete_merge_object(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_info,
+                                  string &sc, string &merge_obj_name)
+{
+  rgw_raw_obj raw_merge_obj;
+  rgw_obj rgw_merge_obj(bucket_info.bucket, merge_obj_name);
+  rgw_placement_rule rule = bucket_info.placement_rule;
+  rule.storage_class = sc;
+  store->get_raw_obj(rule, rgw_merge_obj, &raw_merge_obj);
+  rgw_rados_ref ref;
+  int r = store->getRados()->get_raw_obj_ref(dpp, raw_merge_obj, &ref);
+  if (r < 0) {
+    ldpp_dout(dpp, 1) << "failed to get merge obj ref " << merge_obj_name << dendl;
+    return r;
+  }
+  ObjectWriteOperation del_op;
+  list<string> prefixes;
+  cls_rgw_remove_obj(del_op, prefixes);
+  auto& ioctx = ref.pool.ioctx();
+  return rgw_rados_operate(dpp, ioctx, ref.obj.oid, &del_op, null_yield);
+}
+
 int RGWRados::set_bucket_owner(rgw_bucket& bucket, ACLOwner& owner, const DoutPrefixProvider *dpp)
 {
   RGWBucketInfo info;

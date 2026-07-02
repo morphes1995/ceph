@@ -1776,7 +1776,8 @@ public:
    * Returns 0 on success, -ERR# otherwise.
    */
   int delete_bucket(RGWBucketInfo& bucket_info, RGWObjVersionTracker& objv_tracker, optional_yield y, const DoutPrefixProvider *dpp, bool check_empty = true);
-
+  int delete_merge_object(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_info,
+                          string &sc, string &merge_obj_name);
   void wakeup_meta_sync_shards(set<int>& shard_ids);
   void wakeup_data_sync_shards(const rgw_zone_id& source_zone, map<int, set<string> >& shard_ids);
 
