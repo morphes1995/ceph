@@ -266,7 +266,8 @@ struct RGWBucketAdminOpState {
   bool bypass_trash_bin;
   int trash_expired_days;
 
-  bool obj_inline_enabled;
+  bool obj_inline_enable;
+  bool obj_inline_suspend;
   int stats_refresh_interval;
   int max_quota_pct;
   int tiny_obj_size_kb;
@@ -311,7 +312,8 @@ struct RGWBucketAdminOpState {
   void set_trash_enabled(bool value) { trash_enabled = value; }
   void set_trash_expired_days(int days) {trash_expired_days = days;}
 
-  void set_obj_inline_enabled(bool value) { obj_inline_enabled = value; }
+  void set_obj_inline_enable(bool value) { obj_inline_enable = value; }
+  void set_obj_inline_suspend(bool value) { obj_inline_suspend = value; }
   void set_stats_refresh_interval(int value) { stats_refresh_interval = value; }
   void set_max_quota_pct(int value) { max_quota_pct = value; }
   void set_tiny_obj_size_kb(int value) { tiny_obj_size_kb = value; }
@@ -347,7 +349,7 @@ struct RGWBucketAdminOpState {
   RGWBucketAdminOpState() : list_buckets(false), stat_buckets(false), check_objects(false), 
                             fix_index(false), delete_child_objects(false),
                             bucket_stored(false), sync_bucket(true), bypass_trash_bin(false), trash_expired_days(-1),
-                            obj_inline_enabled(false), stats_refresh_interval(-1), max_quota_pct(-1), tiny_obj_size_kb(-1) {}
+                            obj_inline_enable(false), obj_inline_suspend(false), stats_refresh_interval(-1), max_quota_pct(-1), tiny_obj_size_kb(-1) {}
 };
 
 /*

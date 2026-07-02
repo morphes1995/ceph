@@ -142,7 +142,7 @@ void usage()
   cout << "  bucket trash enable        enable bucket trash data protection\n";
   cout << "  bucket trash update        update bucket trash params\n";
   cout << "  bucket obj inline enable   enable bucket tiny object inline feature\n";
-  cout << "  bucket obj inline disable  disable bucket tiny object inline feature\n";
+  cout << "  bucket obj inline suspend  suspend bucket tiny object inline feature\n";
   cout << "  bucket obj inline config   config bucket tiny object inline feature parameters\n";
   cout << "  bucket radoslist           list rados objects backing bucket's objects\n";
   cout << "  bi get                     retrieve bucket index object entries\n";
@@ -629,7 +629,7 @@ enum class OPT {
   BUCKET_TRASH_ENABLE,
   BUCKET_TRASH_UPDATE,
   BUCKET_OBJ_INLINE_ENABLE,
-  BUCKET_OBJ_INLINE_DISABLE,
+  BUCKET_OBJ_INLINE_SUSPEND,
   BUCKET_OBJ_INLINE_CONFIG,
   BUCKET_RM,
   BUCKET_REWRITE,
@@ -841,7 +841,7 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket trash enable", OPT::BUCKET_TRASH_ENABLE },
   { "bucket trash update", OPT::BUCKET_TRASH_UPDATE },
   { "bucket obj inline enable", OPT::BUCKET_OBJ_INLINE_ENABLE },
-  { "bucket obj inline disable", OPT::BUCKET_OBJ_INLINE_DISABLE },
+  { "bucket obj inline suspend", OPT::BUCKET_OBJ_INLINE_SUSPEND },
   { "bucket obj inline config", OPT::BUCKET_OBJ_INLINE_CONFIG },
   { "bucket rm", OPT::BUCKET_RM },
   { "bucket rewrite", OPT::BUCKET_REWRITE },
@@ -8246,18 +8246,19 @@ next:
       }
   }
 
-  if ((opt_cmd == OPT::BUCKET_OBJ_INLINE_ENABLE) || (opt_cmd == OPT::BUCKET_OBJ_INLINE_DISABLE)) {
+  if ((opt_cmd == OPT::BUCKET_OBJ_INLINE_ENABLE) || (opt_cmd == OPT::BUCKET_OBJ_INLINE_SUSPEND)) {
     if (bucket_name.empty()) {
       cerr << "ERROR: bucket not specified" << std::endl;
       return EINVAL;
     }
-    if (opt_cmd == OPT::BUCKET_OBJ_INLINE_DISABLE) {
-      bucket_op.set_obj_inline_enabled(false);
-    } else {
-      bucket_op.set_obj_inline_enabled(true);
+    if (opt_cmd == OPT::BUCKET_OBJ_INLINE_SUSPEND) {
+      bucket_op.set_obj_inline_suspend(true);
+    }
+    if (opt_cmd == OPT::BUCKET_OBJ_INLINE_ENABLE) {
+      bucket_op.set_obj_inline_enable(true);
     }
 
-    bucket_op.set_tenant(tenant);
+      bucket_op.set_tenant(tenant);
     string err_msg;
     ret = RGWBucketAdminOp::set_obj_inline(store, bucket_op, dpp(), &err_msg);
     if (ret < 0) {

@@ -996,8 +996,8 @@ enum RGWBucketFlags {
   BUCKET_OBJ_LOCK_ENABLED = 0X20,
   BUCKET_TRASH_ENABLED = 0X40,
   BUCKET_TINY_OBJECT_INLINE_ENABLED = 0X80,
-  BUCKET_TINY_OBJECT_INLINE_DISABLING = 0X100,
-  BUCKET_TINY_OBJECT_INLINE_DISABLED = 0X200,
+  BUCKET_TINY_OBJECT_INLINE_SUSPENDING = 0X100,
+  BUCKET_TINY_OBJECT_INLINE_SUSPENDED = 0X200,
 };
 
 class RGWSI_Zone;
@@ -1065,8 +1065,13 @@ struct RGWBucketInfo {
   bool obj_lock_enabled() const { return (flags & BUCKET_OBJ_LOCK_ENABLED) != 0; }
   bool trash_bin_enabled() const { return (flags & BUCKET_TRASH_ENABLED) != 0; }
   bool tiny_obj_inline_enabled() const { return (flags & BUCKET_TINY_OBJECT_INLINE_ENABLED) != 0; }
-  bool tiny_obj_inline_disabled() const { return (flags & BUCKET_TINY_OBJECT_INLINE_DISABLED) != 0; }
-  bool tiny_obj_inline_disabling() const { return (flags & BUCKET_TINY_OBJECT_INLINE_DISABLING) != 0; }
+  bool tiny_obj_inline_suspending() const { return (flags & BUCKET_TINY_OBJECT_INLINE_SUSPENDING) != 0; }
+  bool tiny_obj_inline_suspended() const { return (flags & BUCKET_TINY_OBJECT_INLINE_SUSPENDED) != 0; }
+  bool tiny_obj_inline_disabled() const {
+    return !tiny_obj_inline_enabled() &&
+           !tiny_obj_inline_suspended() &&
+           !tiny_obj_inline_suspending();
+  }
 
   bool has_swift_versioning() const {
     /* A bucket may be versioned through one mechanism only. */

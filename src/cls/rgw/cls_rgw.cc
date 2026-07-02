@@ -5497,8 +5497,8 @@ static int rgw_cls_inlined_buckets_list(cls_method_context_t hctx, bufferlist *i
       return -EIO;
     }
 
-    if (op.only_disabling){
-      if(entry.disabling){
+    if (op.only_suspending){
+      if(entry.suspending){
         ret.buckets.push_back(entry.bucket_id);
       }
     }else{

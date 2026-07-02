@@ -1548,7 +1548,7 @@ WRITE_CLASS_ENCODER(cls_rgw_lc_list_entries_ret)
 
 struct cls_rgw_inline_entry_op {
     string bucket_id;
-    bool disabling;
+    bool suspending;
     bool vacuuming;
     uint64_t  vacuuming_start_time;
     cls_rgw_inline_entry_op() {}
@@ -1556,7 +1556,7 @@ struct cls_rgw_inline_entry_op {
     void encode(ceph::buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
       encode(bucket_id, bl);
-      encode(disabling, bl);
+      encode(suspending, bl);
       encode(vacuuming, bl);
       encode(vacuuming_start_time, bl);
       ENCODE_FINISH(bl);
@@ -1565,7 +1565,7 @@ struct cls_rgw_inline_entry_op {
     void decode(ceph::buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
       decode(bucket_id, bl);
-      decode(disabling, bl);
+      decode(suspending, bl);
       decode(vacuuming, bl);
       decode(vacuuming_start_time, bl);
       DECODE_FINISH(bl);
@@ -1574,17 +1574,17 @@ struct cls_rgw_inline_entry_op {
 WRITE_CLASS_ENCODER(cls_rgw_inline_entry_op)
 
 struct cls_rgw_inlined_buckets_list_op {
-    bool only_disabling;
+    bool only_suspending;
     cls_rgw_inlined_buckets_list_op() {}
 
     void encode(ceph::buffer::list& bl) const {
       ENCODE_START(1, 1, bl);
-        encode(only_disabling, bl);
+        encode(only_suspending, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator& bl) {
       DECODE_START(1, bl);
-        decode(only_disabling, bl);
+        decode(only_suspending, bl);
       DECODE_FINISH(bl);
     }
 };

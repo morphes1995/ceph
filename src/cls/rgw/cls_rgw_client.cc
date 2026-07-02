@@ -1247,12 +1247,12 @@ int cls_rgw_lc_list(IoCtx& io_ctx, const string& oid,
   return r;
 }
 
-int cls_rgw_inline_set_entry(IoCtx& io_ctx, const string& oid, const string& bucket_id, bool disabling)
+int cls_rgw_inline_set_entry(IoCtx& io_ctx, const string& oid, const string& bucket_id, bool suspending)
 {
   bufferlist in, out;
   cls_rgw_inline_entry_op call;
   call.bucket_id = bucket_id;
-  call.disabling = disabling;
+  call.suspending = suspending;
   encode(call, in);
   int r = io_ctx.exec(oid, RGW_CLASS, RGW_INLINE_SET_ENTRY, in, out);
   return r;
@@ -1293,13 +1293,13 @@ int cls_rgw_inline_rm_entry(IoCtx& io_ctx, const string& oid, const string& buck
   return r;
 }
 
-int cls_rgw_inlined_bucket_list(IoCtx& io_ctx, const string& oid, vector<string>& buckets, bool only_disabling)
+int cls_rgw_inlined_bucket_list(IoCtx& io_ctx, const string& oid, vector<string>& buckets, bool only_suspending)
 {
   bufferlist in, out;
   buckets.clear();
 
   cls_rgw_inlined_buckets_list_op op;
-  op.only_disabling = only_disabling;
+  op.only_suspending = only_suspending;
   encode(op, in);
 
   int r = io_ctx.exec(oid, RGW_CLASS, RGW_INLINED_BUCKETS_LIST, in, out);

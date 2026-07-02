@@ -690,13 +690,13 @@ public:
     };
     DetachThread *detach_thread;
 
-    /* thread, monitor object inline disabling buckets */
-    class DisableThread : public Thread {
+    /* thread, monitor object inline suspending buckets */
+    class SuspendThread : public Thread {
         CephContext *cct;
         RGWRadosDetacher *dc;
     public:
 
-        DisableThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
+        SuspendThread(CephContext *_cct, RGWRadosDetacher *_dc) : cct(_cct), dc(_dc) {}
 
         void *entry() override {
           ldout(cct, 20) << "DisableThread: start" << dendl;
@@ -706,7 +706,7 @@ public:
               break;
 
             vector<string> inlined_buckets;
-            int r =dc->list_entry(inlined_buckets, true); // only list disabling buckets
+            int r =dc->list_entry(inlined_buckets, true); // only list suspending buckets
             if(r < 0 && r != -ENOENT)
               continue;
 
@@ -721,7 +721,7 @@ public:
 
         void stop() {}
     };
-    DisableThread *disable_thread;
+    SuspendThread *suspend_thread;
 
     /* thread periodically purge the stale fragments in big merge object */
     class VacuumThread : public Thread {
@@ -786,11 +786,11 @@ public:
     void vacuum_object(rgw::sal::RGWBucket *bucket, string &sc, uint16_t shard_id, uint32_t merge_obj_id, const rgw_merge_object_stat &src_merge_obj);
     void remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, string &sc, uint16_t shard_id, string &src_merge_obj_name);
 
-    int set_entry(rgw_bucket &bucket, bool disabling);
+    int set_entry(rgw_bucket &bucket, bool suspending);
     int set_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec);
     bool is_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec);
     int rm_entry(rgw_bucket &bucket);
-    int list_entry(vector<string>& buckets, bool only_disabling);
+    int list_entry(vector<string>& buckets, bool only_suspending);
 
     ~RGWRadosDetacher() {
       stop();
@@ -819,7 +819,7 @@ private:
       {
         std::unique_lock lock{mutex};
         stop_thread(&detach_thread);
-        stop_thread(&disable_thread);
+        stop_thread(&suspend_thread);
         stop_thread(&vacuum_thread);
       }
     }

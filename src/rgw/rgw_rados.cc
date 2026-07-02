@@ -4472,8 +4472,8 @@ RGWRadosDetacher::RGWRadosDetacher(const DoutPrefixProvider *_dpp, rgw::sal::RGW
   if(use_detacher){
     detach_thread = new DetachThread(_store->ctx(), this);
     detach_thread->create("rgw_dc_thread");
-    disable_thread = new DisableThread(_store->ctx(), this);
-    disable_thread->create("dc_disable_thr");
+    suspend_thread = new SuspendThread(_store->ctx(), this);
+    suspend_thread->create("dc_suspend_thr");
     vacuum_thread = new VacuumThread(_store->ctx(), this);
     vacuum_thread->create("dc_vacuum_thr");
 
@@ -4563,11 +4563,11 @@ int RGWRadosDetacher::detach_bucket(rgw_bucket &bucket, rgw_placement_rule &rule
   return 0;
 }
 
-int RGWRadosDetacher::set_entry(rgw_bucket &bucket, bool disabling)
+int RGWRadosDetacher::set_entry(rgw_bucket &bucket, bool suspending)
 {
   string bucket_id = string_join_reserve(':', bucket.tenant, bucket.name, bucket.marker);
   string oid = "inline.1";
-  return cls_rgw_inline_set_entry(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id, disabling);
+  return cls_rgw_inline_set_entry(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id, suspending);
 }
 
 int RGWRadosDetacher::set_entry_vacuuming(string &bucket_id, uint64_t rgw_vacuum_process_period_sec)
@@ -4589,10 +4589,10 @@ int RGWRadosDetacher::rm_entry(rgw_bucket &bucket)
   return cls_rgw_inline_rm_entry(*store->getRados()->get_inline_pool_ctx(), oid, bucket_id);
 }
 
-int RGWRadosDetacher::list_entry(vector<string>& buckets, bool only_disabling)
+int RGWRadosDetacher::list_entry(vector<string>& buckets, bool only_suspending)
 {
   string oid = "inline.1";
-  return cls_rgw_inlined_bucket_list(*store->getRados()->get_inline_pool_ctx(), oid, buckets, only_disabling);
+  return cls_rgw_inlined_bucket_list(*store->getRados()->get_inline_pool_ctx(), oid, buckets, only_suspending);
 }
 
 void RGWRadosDetacher::try_disable_object_inline(string &bucket_id){
@@ -4630,8 +4630,8 @@ void RGWRadosDetacher::try_disable_object_inline(string &bucket_id){
   if(inlined_entry_num == 0){
     ldpp_dout(dpp, 10) << __func__  <<"disable object inline for bucket: " << bucket_name << dendl;
     RGWBucketInfo &bucket_info = bucket->get_info();
-    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_DISABLING) ;
-    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_DISABLED;
+    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_SUSPENDING) ;
+    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_SUSPENDED;
     // update bucket info
     ret = store->getRados()->put_bucket_instance_info(bucket_info, false, real_time(), &bucket->get_attrs(), dpp);
     if (ret < 0) {

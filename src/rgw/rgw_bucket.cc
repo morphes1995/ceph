@@ -1187,7 +1187,7 @@ int RGWBucket::set_obj_inline(RGWBucketAdminOpState &op_state, const DoutPrefixP
     return -EINVAL;
   }
 
-  if (op_state.obj_inline_enabled) {
+  if (op_state.obj_inline_enable) {
     if (bucket_info.versioned()){
       set_err_msg(err_msg, "could not enable tiny object inline feature, because of bucket was versioned!");
       return -EINVAL;
@@ -1197,26 +1197,27 @@ int RGWBucket::set_obj_inline(RGWBucketAdminOpState &op_state, const DoutPrefixP
       set_err_msg(err_msg, "object inline already enabled!");
       return -EINVAL;
     }
-    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_DISABLING){
-      set_err_msg(err_msg, "object inline is disabling, please wait");
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_SUSPENDING){
+      set_err_msg(err_msg, "object inline is suspending, please wait");
       return -EINVAL;
     }
 
-    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_DISABLED) ;
+    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_SUSPENDED) ;
     bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_ENABLED;
     store->getRados()->get_dc()->set_entry(bucket, false);
-  } else {
-    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_DISABLED){
-      set_err_msg(err_msg, "object inline already disabled!");
+  }
+  if (op_state.obj_inline_suspend) {
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_SUSPENDED){
+      set_err_msg(err_msg, "object inline already suspended!");
       return -EINVAL;
     }
-    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_DISABLING){
-      set_err_msg(err_msg, "object inline is disabling, please wait");
+    if(bucket_info.flags & BUCKET_TINY_OBJECT_INLINE_SUSPENDING){
+      set_err_msg(err_msg, "object inline is suspending, please wait");
       return -EINVAL;
     }
 
-    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_ENABLED) ;
-    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_DISABLING;
+    bucket_info.flags = bucket_info.flags & (~BUCKET_TINY_OBJECT_INLINE_ENABLED);
+    bucket_info.flags = bucket_info.flags | BUCKET_TINY_OBJECT_INLINE_SUSPENDING;
     store->getRados()->get_dc()->set_entry(bucket, true);
   }
 
@@ -1612,8 +1613,11 @@ static int bucket_stats(rgw::sal::RGWRadosStore *store,
     status = "enabled";
   }else if(bucket_info.tiny_obj_inline_disabled()){
     status = "disabled";
-  }else if(bucket_info.tiny_obj_inline_disabling()){
-    status = "disabling";
+  }else if(bucket_info.tiny_obj_inline_suspending()){
+    status = "suspending";
+  }
+  else if(bucket_info.tiny_obj_inline_suspended()){
+    status = "suspended";
   }
   formatter->dump_string("tiny_object_inline_status", status);
   formatter->dump_int("tiny_object_size_threshold_kb", bucket_info.tiny_object_size_kb_threshold);
