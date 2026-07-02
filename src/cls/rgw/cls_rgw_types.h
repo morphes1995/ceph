@@ -981,6 +981,9 @@ struct rgw_merge_object_stats {
     void dump(ceph::Formatter *f) const;
 
     void add_stale_frag(string &sc, string &merge_obj_name, uint64_t size, int this_shard){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
       int shard_id;
       uint32_t merge_obj_id;
       int version;
@@ -997,6 +1000,9 @@ struct rgw_merge_object_stats {
     }
 
     void set_merge_obj(string &sc, string &merge_obj_name, rgw_merge_object_stat &merge_obj){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
@@ -1004,6 +1010,9 @@ struct rgw_merge_object_stats {
     }
 
     void rm_merge_obj(string &sc, string &merge_obj_name){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
@@ -1017,6 +1026,9 @@ struct rgw_merge_object_stats {
     }
 
     void set_merge_obj_size(string &sc, string &merge_obj_name, uint32_t size){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
@@ -1024,6 +1036,9 @@ struct rgw_merge_object_stats {
     }
 
     void mark_readonly(string &sc, string &merge_obj_name){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
       int shard_id;
       uint32_t merge_obj_id;
       _parse_name(merge_obj_name, &shard_id, &merge_obj_id);

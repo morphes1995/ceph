@@ -342,6 +342,9 @@ static void encode_olh_data_key(const cls_rgw_obj_key& key, string *index_key)
 
 static void encode_inlined_entry_key(string &sc, string &obj_name, string *index_key)
 {
+  if(sc.empty()){
+    sc = "STANDARD";
+  }
   *index_key = BI_PREFIX_CHAR;
   index_key->append(bucket_index_prefixes[BI_BUCKET_INLINED_OBJ_INDEX]);
   index_key->append("%");
@@ -361,8 +364,11 @@ static void decode_inlined_entry_key(const string& index_key, string *sc, cls_rg
   key->instance = "";
 }
 
-static void encode_stale_frag_key(const string &sc, const string &merge_obj_name, string *index_key, bool include_offset,  uint32_t *offset = NULL)
+static void encode_stale_frag_key(string &sc, const string &merge_obj_name, string *index_key, bool include_offset,  uint32_t *offset = NULL)
 {
+  if(sc.empty()){
+    sc = "STANDARD";
+  }
   *index_key = BI_PREFIX_CHAR;
   index_key->append(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX]);
   index_key->append("%");
@@ -1663,7 +1669,8 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
           return rc;
         }
         ceph_assert(real_entry.meta.inline_head);
-        ceph_assert(inlined_index_sc == real_entry.meta.storage_class);
+        string entry_sc = real_entry.meta.storage_class.empty() ? "STANDARD" : real_entry.meta.storage_class;
+        ceph_assert(inlined_index_sc == entry_sc);
 
         if(!real_entry.pending_map.empty()){
             continue;
@@ -1860,11 +1867,12 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
 
   header.merge_obj_stats.set_merge_obj_size(op.sc, op.merge_obj_name, op.merged_obj_size);
 
+  string sc = op.sc.empty() ? "STANDARD" : op.sc;
   uint32_t merge_obj_id;
   _parse_name(op.merge_obj_name, nullptr, &merge_obj_id, nullptr);
-  if(op.merged_obj_size >= (op.rgw_merge_object_max_size_mb<<10<<10) && merge_obj_id == header.current_merge_obj_ids[op.sc]){
-    header.merge_obj_stats.mark_readonly(op.sc, op.merge_obj_name);
-    header.current_merge_obj_ids[op.sc] ++; // switch to next merge big object
+  if(op.merged_obj_size >= (op.rgw_merge_object_max_size_mb<<10<<10) && merge_obj_id == header.current_merge_obj_ids[sc]){
+    header.merge_obj_stats.mark_readonly(sc, op.merge_obj_name);
+    header.current_merge_obj_ids[sc] ++; // switch to next merge big object
   }
 
   return write_bucket_header(hctx, &header);

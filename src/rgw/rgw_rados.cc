@@ -6373,7 +6373,9 @@ static void accumulate_stale_frags(const rgw_bucket_dir_header& header,
 {
   using sc_stats_type = std::map<uint16_t, std::map<uint32_t,rgw_merge_object_stat>>; // shard_id -> <merge_obj_id, stat>
   for (auto& sc: header.merge_obj_stats.stats) {
-    sc_stats_type &sc_stats = merge_objects_stale_frags->stats[sc.first];
+    string storage_class = sc.first;
+    ceph_assert(!storage_class.empty());
+    sc_stats_type &sc_stats = merge_objects_stale_frags->stats[storage_class];
     for (auto& shard: sc.second) {
       std::map<uint32_t,rgw_merge_object_stat> &shard_stats = sc_stats[shard.first];
       for (auto &item: shard.second){
