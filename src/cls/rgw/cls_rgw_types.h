@@ -1026,6 +1026,9 @@ struct rgw_merge_object_stats {
     }
 
     void set_merge_obj_size(string &sc, string &merge_obj_name, uint32_t size){
+      if(size == 0){
+        return;
+      }
       if(sc.empty()){
         sc = "STANDARD";
       }

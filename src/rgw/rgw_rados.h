@@ -1818,6 +1818,10 @@ public:
                         map<string, bufferlist>& attrs,
                         map<string, bufferlist>* rmattrs,
                         optional_yield y);
+  int set_attrs_in_bi_entry(const DoutPrefixProvider *dpp, RGWObjState *state, const RGWBucketInfo& bucket_info, rgw_obj& src_obj,
+                                      map<string, bufferlist>& attrs,
+                                      map<string, bufferlist>* prmattrs,
+                                      optional_yield y);
 
   int get_obj_state(const DoutPrefixProvider *dpp, RGWObjectCtx *rctx, const RGWBucketInfo& bucket_info, const rgw_obj& obj, RGWObjState **state,
                     bool follow_olh, optional_yield y, bool assume_noent = false);

@@ -358,6 +358,10 @@ void cls_rgw_bucket_complete_op(librados::ObjectWriteOperation& o, RGWModifyOp o
 				std::list<cls_rgw_obj_key> *remove_objs, bool log_op,
                                 uint16_t bilog_op, rgw_zone_set *zones_trace, bool update_quota_stats);
 
+int cls_rgw_set_attrs_op(librados::IoCtx& io_ctx, string &oid, string &key,
+                          map<string, bufferlist> &attrs, map<string, bufferlist> &rmattrs, string &obj_tag_cmp,
+                          string &owner, string &etag, string &content_type, string &storage_class);
+
 void cls_rgw_remove_obj(librados::ObjectWriteOperation& o, std::list<std::string>& keep_attr_prefixes);
 void cls_rgw_obj_store_pg_ver(librados::ObjectWriteOperation& o, const std::string& attr);
 void cls_rgw_obj_check_attrs_prefix(librados::ObjectOperation& o, const std::string& prefix, bool fail_if_exist);
