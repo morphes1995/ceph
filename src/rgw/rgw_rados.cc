@@ -4398,6 +4398,10 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
         offsets_info.offsets.emplace_back(rgw_object_offset(size + entry.offset, entry.size, entry.key.name, entry.inline_index_epoch));
       }
     }
+    if(offsets_info.offsets.empty()){
+      r = 0;
+      break;
+    }
     encode(offsets_info, offsets_bl);
     std::map<std::string, bufferlist> map = {{"offsets_" + to_string(size), offsets_bl}};
     op.omap_set(map);
@@ -7946,11 +7950,20 @@ int RGWRados::set_attrs(const DoutPrefixProvider *dpp, void *ctx, const RGWBucke
     return r;
   }
   RGWObjectCtx *rctx = static_cast<RGWObjectCtx *>(ctx);
+  if (!rctx)
+    return 0;
 
   ObjectWriteOperation op;
   RGWObjState *state = NULL;
+  r = get_obj_state(dpp, rctx, bucket_info, obj, &state, false, y);
+  if (r < 0)
+    return r;
 
-  r = append_atomic_test(dpp, rctx, bucket_info, obj, op, &state, y);
+  if(state->inlined){
+    return set_attrs_in_bi_entry(dpp, state, bucket_info, src_obj, attrs, rmattrs, y);
+  }
+
+  r =  append_atomic_test(dpp, state, op);
   if (r < 0)
     return r;
 
@@ -8064,6 +8077,69 @@ int RGWRados::set_attrs(const DoutPrefixProvider *dpp, void *ctx, const RGWBucke
     if (iter != state->attrset.end()) {
       iter->second = state->obj_tag;
     }
+  }
+
+  return 0;
+}
+
+int RGWRados::set_attrs_in_bi_entry(const DoutPrefixProvider *dpp, RGWObjState *state, const RGWBucketInfo& bucket_info, rgw_obj& src_obj,
+                        map<string, bufferlist>& attrs,
+                        map<string, bufferlist>* prmattrs,
+                        optional_yield y)
+{
+  map<string, bufferlist> rmattrs;
+  if(prmattrs){
+    rmattrs = *prmattrs;
+  }
+  if(attrs.empty() && rmattrs.empty()){
+    return 0;
+  }
+
+  rgw_obj obj = src_obj;
+
+  string obj_tag;
+  if (state->obj_tag.length() > 0 && !state->fake_tag) {// check for backward compatibility
+    obj_tag = state->obj_tag.c_str();
+  }
+
+  bufferlist acl_bl = attrs[RGW_ATTR_ACL];
+  ACLOwner owner;
+  if (acl_bl.length()) {
+    int ret = decode_policy(acl_bl, &owner);
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "WARNING: could not decode policy ret=" << ret << dendl;
+    }
+  }
+
+  bufferlist etag_bl = attrs[RGW_ATTR_ETAG];
+  bufferlist content_type_bl = attrs[RGW_ATTR_CONTENT_TYPE];
+  string etag = rgw_bl_str(etag_bl);
+  string content_type = rgw_bl_str(content_type_bl);
+  string storage_class;
+  auto iter = attrs.find(RGW_ATTR_STORAGE_CLASS);
+  if (iter != attrs.end()) {
+    storage_class = rgw_bl_str(iter->second);
+  }
+
+  BucketShard bs(this);
+  int ret = bs.init(bucket_info.bucket, obj, nullptr /* no RGWBucketInfo */, dpp);
+  if (ret < 0) {
+    ldpp_dout(dpp, 5) << "bs.init() returned ret=" << ret << dendl;
+    return ret;
+  }
+  auto& ref = bs.bucket_obj.get_ref();
+  int r = cls_rgw_set_attrs_op(ref.pool.ioctx(), ref.obj.oid, obj.key.name,
+                           attrs, rmattrs, obj_tag, owner.get_display_name(), etag, content_type, storage_class);
+  if (r < 0){
+    return r;
+  }
+
+  map<string, bufferlist>::iterator it;
+  for (it = rmattrs.begin(); it != rmattrs.end(); ++it) {
+    state->attrset.erase(it->first);
+  }
+  for (it = attrs.begin(); it != attrs.end(); ++it) {
+    state->attrset[it->first] = it->second;
   }
 
   return 0;

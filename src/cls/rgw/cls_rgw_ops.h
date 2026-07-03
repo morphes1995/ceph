@@ -174,6 +174,48 @@ struct rgw_cls_obj_complete_op
 };
 WRITE_CLASS_ENCODER(rgw_cls_obj_complete_op)
 
+struct rgw_cls_set_attrs_op
+{
+  string key;
+  map<string, bufferlist> attrs;
+  map<string, bufferlist> rmattrs;
+  real_time mtime;
+  string owner;
+  string etag;
+  string content_type;
+  string storage_class;
+  string obj_tag_cmp;
+  rgw_cls_set_attrs_op() {}
+
+  void encode(ceph::buffer::list &bl) const {
+    ENCODE_START(1, 1, bl);
+      encode(key, bl);
+      encode(attrs, bl);
+      encode(rmattrs, bl);
+      encode(mtime, bl);
+      encode(owner, bl);
+      encode(etag, bl);
+      encode(content_type, bl);
+      encode(storage_class, bl);
+      encode(obj_tag_cmp, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(ceph::buffer::list::const_iterator &bl) {
+    DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl)
+      decode(key, bl);
+      decode(attrs, bl);
+      decode(rmattrs, bl);
+      decode(mtime, bl);
+      decode(owner, bl);
+      decode(etag, bl);
+      decode(content_type, bl);
+      decode(storage_class, bl);
+      decode(obj_tag_cmp, bl);
+    DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(rgw_cls_set_attrs_op)
+
 struct rgw_cls_link_olh_op {
   cls_rgw_obj_key key;
   std::string olh_tag;

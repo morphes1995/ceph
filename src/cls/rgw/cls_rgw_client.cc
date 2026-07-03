@@ -318,6 +318,25 @@ void cls_rgw_bucket_complete_op(ObjectWriteOperation& o, RGWModifyOp op, string&
   o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_OP, in);
 }
 
+int cls_rgw_set_attrs_op(librados::IoCtx& io_ctx, string &oid, string &key,
+                          map<string, bufferlist> &attrs, map<string, bufferlist> &rmattrs, string &obj_tag_cmp,
+                          string &owner, string &etag, string &content_type, string &storage_class)
+{
+  bufferlist in, out;
+  rgw_cls_set_attrs_op call;
+  call.key = key;
+  call.attrs = attrs;
+  call.rmattrs = rmattrs;
+  call.obj_tag_cmp = obj_tag_cmp;
+  call.mtime = ceph::real_clock::now();
+  call.owner = owner;
+  call.etag = etag;
+  call.content_type = content_type;
+  call.storage_class = storage_class;
+  encode(call, in);
+  return io_ctx.exec(oid, RGW_CLASS, RGW_BI_SET_ATTRS, in, out);
+}
+
 void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
                             const cls_rgw_obj_key& start_obj,
                             const std::string& filter_prefix,
