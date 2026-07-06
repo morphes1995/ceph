@@ -444,7 +444,10 @@ bool rgw_cls_bi_entry::get_info(cls_rgw_obj_key *key,
         rgw_bucket_inlined_entry_index entry;
         decode(entry, iter);
         if(key){
-          key->name = idx.substr(6);
+          string sc_and_name = idx.substr(6);
+          vector<std::string> fields;
+          boost::split(fields, sc_and_name, boost::is_any_of("%"));
+          key->name = fields[2];
           key->instance ="";
         }
         account = true;

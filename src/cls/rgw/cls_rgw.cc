@@ -1283,6 +1283,17 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       }
     } // CLS_RGW_OP_DEL
     else if (op.op == CLS_RGW_OP_ADD) {
+      string old_sc = entry.meta.storage_class;
+      if(op.meta.storage_class != old_sc){
+        std::string old_inlined_index_key;
+        encode_inlined_entry_key(old_sc, entry.key.name, &old_inlined_index_key);
+        rc = cls_cxx_map_remove_key(hctx, old_inlined_index_key);
+        if (rc < 0 && rc != -ENOENT){
+          CLS_LOG(1, "WARNING: %s: old inlined index key %s deletion failed, old sc:%s, new sc: %s", __func__,
+                  old_inlined_index_key.c_str(), old_sc.c_str(), op.meta.storage_class.c_str());
+        }
+      }
+
       rgw_bucket_dir_entry_meta& meta = op.meta;
       entry.meta = meta;
       entry.key = op.key;
@@ -1501,8 +1512,8 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
       // data still inlined in this entry, create delete marker
       // update inlined entry stats
       header.stats[entry.meta.category].inlined_total_entry_size -= entry.meta.size;
-      op.meta.storage_class = entry.meta.storage_class;
       entry.meta = op.meta;
+      entry.meta.storage_class= old_sc;
       // logically delete inlined object,use this entry to cover the possibly existed head object
       entry.meta.inline_head = true;
       entry.exists = false;
@@ -1517,7 +1528,7 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
 
       // insert inlined entry index key, for fast list all inlined entries in this shard
       std::string inlined_entry_key;
-      encode_inlined_entry_key(op.meta.storage_class, op.key.name, &inlined_entry_key);
+      encode_inlined_entry_key(old_sc, op.key.name, &inlined_entry_key);
 
       rgw_bucket_inlined_entry_index index_val;
       index_val.entry_size = entry.meta.size;
@@ -1638,18 +1649,6 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
     done = keys.empty();
 
     for (auto kiter = keys.cbegin(); kiter != keys.cend(); ++kiter) {
-
-      rgw_bucket_inlined_entry_index entry;
-      try {
-        const bufferlist& bl = kiter->second;
-        auto eiter = bl.cbegin();
-        decode(entry, eiter);
-      } catch (ceph::buffer::error& err) {
-        CLS_LOG(1, "ERROR: %s: failed to decode inlined index entry, key=%s",
-                __func__, kiter->first.c_str());
-        return -EINVAL;
-      }
-
       start_after_omap_key = kiter->first;
       CLS_LOG(20, "%s: working on key=%s len=%zu", __func__, kiter->first.c_str(), kiter->first.size());
 
@@ -1664,8 +1663,8 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
         std::string real_idx;
         rc = read_key_entry(hctx, real_key, &real_idx, &real_entry);
         if (rc < 0) {
-          CLS_LOG(1, "ERROR: %s: failed read real entry, key=%s",
-                  __func__, real_idx.c_str());
+          CLS_LOG(1, "ERROR: %s: failed read real entry, key=%s, sc=%s, rc:%d",
+                  __func__, real_idx.c_str(), inlined_index_sc.c_str(), rc);
           return rc;
         }
         ceph_assert(real_entry.meta.inline_head);

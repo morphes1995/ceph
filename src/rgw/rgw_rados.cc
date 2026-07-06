@@ -4978,6 +4978,7 @@ void RGWRadosDetacher::remove_fully_stale_obj(rgw::sal::RGWBucket *bucket, strin
     ldpp_dout(dpp, 1) << "ERROR failed to delete src merge obj :" << src_merge_obj_name << " r: " << r << dendl;
     return;
   }
+  ldpp_dout(dpp, 20) << "src merge obj :" << src_merge_obj_name << " removed, sc: " << sc << dendl;
 }
 
 /*
