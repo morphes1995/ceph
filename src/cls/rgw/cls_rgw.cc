@@ -1864,14 +1864,19 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
     }
   }
 
-  header.merge_obj_stats.set_merge_obj_size(op.sc, op.merge_obj_name, op.merged_obj_size);
-
-  string sc = op.sc.empty() ? "STANDARD" : op.sc;
-  uint32_t merge_obj_id;
-  _parse_name(op.merge_obj_name, nullptr, &merge_obj_id, nullptr);
-  if(op.merged_obj_size >= (op.rgw_merge_object_max_size_mb<<10<<10) && merge_obj_id == header.current_merge_obj_ids[sc]){
-    header.merge_obj_stats.mark_readonly(sc, op.merge_obj_name);
-    header.current_merge_obj_ids[sc] ++; // switch to next merge big object
+  if(header.merge_obj_stats.merge_obj_exists(op.sc, op.merge_obj_name) &&
+    header.merge_obj_stats.merge_obj_get(op.sc, op.merge_obj_name).size >= op.merged_obj_size){
+    CLS_LOG(5, "WARNING: %s: sc %s %s set size to %d  <= existed size: %d", __func__,
+            op.sc.c_str(), op.merge_obj_name.c_str(), op.merged_obj_size, header.merge_obj_stats.merge_obj_get(op.sc, op.merge_obj_name).size);
+  }else{
+    CLS_LOG(20, "INFO: %s: sc %s %s set size to %d ", __func__, op.sc.c_str(), op.merge_obj_name.c_str(), op.merged_obj_size);
+    header.merge_obj_stats.set_merge_obj_size(op.sc, op.merge_obj_name, op.merged_obj_size);string sc = op.sc.empty() ? "STANDARD" : op.sc;
+    uint32_t merge_obj_id;
+    _parse_name(op.merge_obj_name, nullptr, &merge_obj_id, nullptr);
+    if(op.merged_obj_size >= (op.rgw_merge_object_max_size_mb<<10<<10) && merge_obj_id == header.current_merge_obj_ids[sc]){
+      header.merge_obj_stats.mark_readonly(sc, op.merge_obj_name);
+      header.current_merge_obj_ids[sc] ++; // switch to next merge big object
+    }
   }
 
   return write_bucket_header(hctx, &header);
@@ -5718,10 +5723,7 @@ stale_frags_range_rm:
   string next_merge_obj_name = "evoc.merged.big.obj_" + to_string(shard_id)
                                                             + "_" + to_string(merge_obj_id) + "_" +to_string(version+1);
   std::string end_key;
-  end_key = BI_PREFIX_CHAR;
-  end_key.append(bucket_index_prefixes[BI_BUCKET_STALE_FRAG_INDEX]);
-  end_key.append(next_merge_obj_name);
-
+  encode_stale_frag_key(op.storage_class, next_merge_obj_name, &end_key, false);
 
   CLS_LOG(20, " %s removing key range: [%s, %s]", __func__, start_key.c_str(), end_key.c_str());
   rc = cls_cxx_map_remove_range(hctx, start_key, end_key);

@@ -999,6 +999,26 @@ struct rgw_merge_object_stats {
       stats[sc][shard_id][merge_obj_id].size_to_release += size;
     }
 
+    bool merge_obj_exists(string &sc, string &merge_obj_name){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
+      int shard_id;
+      uint32_t merge_obj_id;
+      _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
+      return stats[sc][shard_id].find(merge_obj_id) != stats[sc][shard_id].end();
+    }
+
+    rgw_merge_object_stat & merge_obj_get(string &sc, string &merge_obj_name){
+      if(sc.empty()){
+        sc = "STANDARD";
+      }
+      int shard_id;
+      uint32_t merge_obj_id;
+      _parse_name(merge_obj_name, &shard_id, &merge_obj_id);
+      return stats[sc][shard_id][merge_obj_id];
+    }
+
     void set_merge_obj(string &sc, string &merge_obj_name, rgw_merge_object_stat &merge_obj){
       if(sc.empty()){
         sc = "STANDARD";
