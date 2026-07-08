@@ -8102,21 +8102,29 @@ int RGWRados::set_attrs_in_bi_entry(const DoutPrefixProvider *dpp, RGWObjState *
     obj_tag = state->obj_tag.c_str();
   }
 
-  bufferlist acl_bl = attrs[RGW_ATTR_ACL];
   ACLOwner owner;
-  if (acl_bl.length()) {
-    int ret = decode_policy(acl_bl, &owner);
-    if (ret < 0) {
-      ldpp_dout(dpp, 0) << "WARNING: could not decode policy ret=" << ret << dendl;
+  auto iter = attrs.find(RGW_ATTR_ACL);
+  if (iter != attrs.end()) {
+    if (iter->second.length()) {
+      int ret = decode_policy(iter->second, &owner);
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << "WARNING: could not decode policy ret=" << ret << dendl;
+      }
     }
   }
 
-  bufferlist etag_bl = attrs[RGW_ATTR_ETAG];
-  bufferlist content_type_bl = attrs[RGW_ATTR_CONTENT_TYPE];
-  string etag = rgw_bl_str(etag_bl);
-  string content_type = rgw_bl_str(content_type_bl);
+  string etag;
+  iter = attrs.find(RGW_ATTR_ETAG);
+  if (iter != attrs.end()) {
+    etag = rgw_bl_str(iter->second);
+  }
+  string content_type;
+  iter = attrs.find(RGW_ATTR_CONTENT_TYPE);
+  if (iter != attrs.end()) {
+    content_type = rgw_bl_str(iter->second);
+  }
   string storage_class;
-  auto iter = attrs.find(RGW_ATTR_STORAGE_CLASS);
+  iter = attrs.find(RGW_ATTR_STORAGE_CLASS);
   if (iter != attrs.end()) {
     storage_class = rgw_bl_str(iter->second);
   }
