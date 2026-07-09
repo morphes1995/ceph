@@ -4343,6 +4343,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
     rgw_bucket_inlined_entry d;
     d.key = cls_rgw_obj_key(entry.key.name);
     d.tag = entry.tag;
+    d.mtime = entry.meta.mtime;
     d.inline_index_epoch = entry.meta.inline_index_epoch;
     d.offset = offset;
     d.size = entry.meta.head_data_size;
@@ -4395,7 +4396,8 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
     bufferlist offsets_bl;
     for(auto &entry: entries_merged){
       if(entry.size > 0){
-        offsets_info.offsets.emplace_back(rgw_object_offset(size + entry.offset, entry.size, entry.key.name, entry.inline_index_epoch));
+        offsets_info.offsets.emplace_back(
+                rgw_object_offset(size + entry.offset, entry.size, entry.key.name, entry.mtime, entry.inline_index_epoch));
       }
     }
     if(offsets_info.offsets.empty()){
@@ -4798,7 +4800,8 @@ void RGWRadosDetacher::vacuum_object(rgw::sal::RGWBucket *bucket, string &sc, ui
   int prev_off = -1;
   for(auto &item : offsets){
     if(stale_frags.find(item.first) == stale_frags.end()){
-        new_offsets_info.offsets.push_back(rgw_object_offset(dest_merge_obj_size1, item.second.size, item.second.obj_name, item.second.index_epoch));
+        new_offsets_info.offsets.push_back(
+                rgw_object_offset(dest_merge_obj_size1, item.second.size, item.second.obj_name, item.second.mtime, item.second.index_epoch));
         dest_merge_obj_size1 += item.second.size;
     }
 
@@ -6699,6 +6702,7 @@ int RGWRados::Object::Delete::rename_bi_entry_from_trash_bin(const DoutPrefixPro
     return -EINVAL;
   }
 
+  trash_obj.index_hash_source = origin_obj.key.name;
   r = store->bi_rename(dpp, target->get_bucket_info().bucket, trash_obj, trash_obj.key.name, origin_obj.key.name, trash_obj_tag, false);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "WARNING: failed to rename bi entry (" << trash_obj.key.name << ") from trash bin. r:" << r << dendl;
@@ -10710,9 +10714,14 @@ int RGWRados::finish_vacuum(const DoutPrefixProvider *dpp, const RGWBucketInfo& 
     }
     ops[obj.first] = op;
   }
-  for (const auto &off: new_offsets_info.offsets){
+  for (auto &off: new_offsets_info.offsets){
+    string index_hash_source = off.obj_name;
+    if (with_trash_reserved_prefix(off.obj_name)){
+      u_int16_t obj_name_len = off.obj_name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+      index_hash_source = off.obj_name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+    }
     int target_shard_id = 0;
-    int ret = store->getRados()->get_target_shard_id(bucket_info.layout.current_index.layout.normal, off.obj_name, &target_shard_id);
+    int ret = store->getRados()->get_target_shard_id(bucket_info.layout.current_index.layout.normal, index_hash_source, &target_shard_id);
     if (ret < 0) {
       ldpp_dout(dpp, -1) << __func__ << "ERROR: get_target_shard_id() returned ret=" << ret << dendl;
       return ret;

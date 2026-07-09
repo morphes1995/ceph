@@ -539,6 +539,7 @@ WRITE_CLASS_ENCODER(rgw_cls_list_ret)
 struct rgw_bucket_inlined_entry {
     cls_rgw_obj_key key;
     std::string tag;
+    ceph::real_time mtime;
     uint64_t inline_index_epoch;
     uint32_t offset;
     uint32_t size;
@@ -549,6 +550,7 @@ struct rgw_bucket_inlined_entry {
       ENCODE_START(1, 1, bl);
         encode(key, bl);
         encode(tag, bl);
+        encode(mtime, bl);
         encode(inline_index_epoch, bl);
         encode(offset, bl);
         encode(size, bl);
@@ -558,6 +560,7 @@ struct rgw_bucket_inlined_entry {
       DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
         decode(key, bl);
         decode(tag, bl);
+        decode(mtime, bl);
         decode(inline_index_epoch, bl);
         decode(offset, bl);
         decode(size, bl);

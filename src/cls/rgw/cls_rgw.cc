@@ -1641,6 +1641,7 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
     rc = cls_cxx_map_get_vals(hctx, start_after_omap_key, op.filter_prefix, op.num_entries - name_entry_map.size(),
                                &keys, &more);
     if (rc < 0) {
+      CLS_LOG(1, "ERROR: %s: cls_cxx_map_get_vals r: %d", __func__, rc);
       return rc;
     }
     CLS_LOG(20, "%s: on attempt %d get_obj_vls returned %ld entries, more=%d",
@@ -1672,7 +1673,8 @@ int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, 
         ceph_assert(inlined_index_sc == entry_sc);
 
         if(!real_entry.pending_map.empty()){
-            continue;
+          CLS_LOG(1, "INFO: %s: entry %s has pending op , skip it ", __func__, real_entry.key.name.c_str());
+          continue;
         }
 
         name_entry_map[real_entry.key.name] = real_entry;
@@ -3507,6 +3509,7 @@ static int rgw_inlined_bi_rename_op(cls_method_context_t hctx, bufferlist *in, b
     decode(entry.meta.mtime, origin_mtime_bl);
     entry.meta.head_attrs.erase("user.rgw.origin_mtime");
   }
+  entry.pending_map.clear();
 
   bufferlist new_entry_bl;
   entry.key.name = op.dest_name;
@@ -5687,6 +5690,36 @@ static int rgw_cls_finish_vacuum(cls_method_context_t hctx, bufferlist *in,
     }
     // object already deleted or overwritten
     if(rc == -ENOENT || !entry.exists || !entry.meta.inline_head || entry.meta.inline_index_epoch != off.index_epoch){
+      cls_rgw_obj_key obj_in_trash_key;
+      std::stringstream ss;
+      ss << off.mtime;
+      obj_in_trash_key.name = ".trash/" + off.obj_name + ".CREATED_AT_" + ss.str(); // obj name with create time
+      std::string trash_obj_idx;
+      rgw_bucket_dir_entry obj_in_trash_entry;
+      int rc = read_key_entry(hctx, obj_in_trash_key, &trash_obj_idx, &obj_in_trash_entry);
+      if (rc < 0 && rc != -ENOENT) {
+        return rc;
+      }
+      if(obj_in_trash_entry.exists){
+        // if obj was moved to trash bin, we can not mark the data stale
+        CLS_LOG(20, "INFO: %s: obj:%s moved to trash bin (%s), we skip to mark the data stale\n",
+                __func__, obj_idx.c_str(), obj_in_trash_entry.key.name.c_str());
+
+        // update data location
+        obj_in_trash_entry.meta.merge_obj_name = op.dest_merge_obj_name;
+        obj_in_trash_entry.meta.offset = off.offset;
+        bufferlist new_key_bl;
+        encode(obj_in_trash_entry, new_key_bl);
+        rc = cls_cxx_map_set_val(hctx, trash_obj_idx, &new_key_bl);
+        if (rc < 0) {
+          CLS_LOG(1, "ERROR: %s: unable to set map val, key=%s, rc=%d",
+                  __func__, escape_str(obj_idx).c_str(), rc);
+          return rc;
+        }
+
+        continue;
+      }
+
       CLS_LOG(10, "INFO: %s: during the merge object vacuum,  extra stale frags generated, obj:%s merge obj; %s offset:%d, size:%d\n",
               __func__, obj_idx.c_str(), op.dest_merge_obj_name.c_str(), off.offset, off.size);
       rc = add_stale_frag(hctx, &header, op.storage_class, op.dest_merge_obj_name, off.offset, off.size);

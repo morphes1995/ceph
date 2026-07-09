@@ -718,6 +718,11 @@ int RGWBucketReshard::do_reshard(int num_shards,
 	  // place the multipart .meta object on the same shard as its head object
 	  obj.index_hash_source = mp.get_key();
 	}
+  if (with_trash_reserved_prefix(obj.key.name)){
+    u_int16_t obj_name_len = obj.key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+    obj.index_hash_source = obj.key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+  }
+
 	int ret = store->getRados()->get_target_shard_id(new_bucket_info.layout.current_index.layout.normal, obj.get_hash_object(), &target_shard_id);
 	if (ret < 0) {
 	  ldpp_dout(dpp, -1) << "ERROR: get_target_shard_id() returned ret=" << ret << dendl;

@@ -1075,15 +1075,17 @@ struct rgw_object_offset{
     uint32_t offset;
     uint32_t size;
     string obj_name;
+    ceph::real_time mtime;
     uint64_t index_epoch;
     rgw_object_offset() {}
-    rgw_object_offset(uint32_t off, uint32_t _size, string &name, uint64_t _index_epoch):
-                    offset(off), size(_size), obj_name(name), index_epoch(_index_epoch) {}
+    rgw_object_offset(uint32_t off, uint32_t _size, string &name, ceph::real_time &_mtime, uint64_t _index_epoch):
+                    offset(off), size(_size), obj_name(name), mtime(_mtime), index_epoch(_index_epoch) {}
     void encode(ceph::buffer::list &bl) const {
       ENCODE_START(1, 1, bl);
         encode(offset, bl);
         encode(size, bl);
         encode(obj_name, bl);
+        encode(mtime, bl);
         encode(index_epoch, bl);
       ENCODE_FINISH(bl);
     }
@@ -1092,6 +1094,7 @@ struct rgw_object_offset{
         decode(offset, bl);
         decode(size, bl);
         decode(obj_name, bl);
+        decode(mtime, bl);
         decode(index_epoch, bl);
       DECODE_FINISH(bl);
     }
