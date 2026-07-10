@@ -7014,6 +7014,7 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   if (r < 0)
     return r;
 
+  bool head_and_bi_entry_copied = false;
   bool update_quota_stats = true;
   if (params.bucket_trash_bin_enabled) {
       /**
@@ -7025,6 +7026,7 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
       if (!params.obj_in_bucket_trash_bin && !params.del_obj_bypass_trash_bin){
           update_quota_stats = false; // if obj move to trash bin, keep quota stats unchanged
           target->state->keep_tail = true; // if obj move to trash bin, don't send the object's tail for garbage collection
+          head_and_bi_entry_copied = true;
           r =  copy_head_and_bi_to_trash_bin(y, dpp);// copy head and bi entry to trash bin on delete
           if ( r < 0)
               return r;
@@ -7042,7 +7044,6 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
       store->obj_to_raw(target->bucket_info.placement_rule, origin_obj, &raw_obj);
       // check if the corresponding origin obj exist, if so tail objs should keep
       if (origin_obj_existence_check(dpp, origin_obj, raw_obj, y)) {
-          update_quota_stats = false;
           target->state->keep_tail = true;
           ldpp_dout(dpp, 0) << "WARNING: when deleting obj(" << obj.key.name << ")"
                             << ", found it's origin obj("<<origin_obj.key.name<<") exists, keep the tail objects to avoid data loss"<<dendl;
@@ -7097,7 +7098,7 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "ERROR: index_op.cancel() returned ret=" << ret << dendl;
     }
-    if (!update_quota_stats) {
+    if (head_and_bi_entry_copied) {
       // head and bi entry copied to trash bin, now we need clear it
       revert_head_and_bi_from_trash_bin(y, dpp);
     }
@@ -7154,14 +7155,6 @@ bool RGWRados::Object::Delete::origin_obj_existence_check(const DoutPrefixProvid
         if (target->state->get_attr(RGW_ATTR_ID_TAG, id_tag_bl) &&
                 origin_obj_attrset.find(RGW_ATTR_ID_TAG) != origin_obj_attrset.end()){
             if (strncmp(origin_obj_attrset[RGW_ATTR_ID_TAG].c_str(), id_tag_bl.c_str(), id_tag_bl.length()) == 0) {
-                return true;
-            }
-        }
-
-        bufferlist etag_bl;
-        if (target->state->get_attr(RGW_ATTR_ETAG, etag_bl) &&
-            origin_obj_attrset.find(RGW_ATTR_ETAG) != origin_obj_attrset.end()){
-            if (strncmp(origin_obj_attrset[RGW_ATTR_ETAG].c_str(), etag_bl.c_str(), etag_bl.length()) == 0) {
                 return true;
             }
         }
