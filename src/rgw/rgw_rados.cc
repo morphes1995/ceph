@@ -6657,6 +6657,45 @@ int RGWRados::Object::Delete::copy_head_and_bi_to_trash_bin(optional_yield y, co
     return 0;
 }
 
+int RGWRados::Object::Delete::revert_head_and_bi_from_trash_bin(optional_yield y, const DoutPrefixProvider *dpp){
+  RGWRados *store = target->get_store();
+  rgw_obj& obj = target->get_obj();
+  RGWObjState *state;
+  int r = target->get_state(dpp, &state, false, y);
+  if (r < 0)
+    return r;
+  rgw_obj rgw_obj_in_trash = obj;
+  std::stringstream ss;
+  ss << state->mtime;
+  rgw_obj_in_trash.key.name = RGW_TRASH_RESERVATION_PREFIX + rgw_obj_in_trash.key.name + ".CREATED_AT_" + ss.str(); // obj name with create time
+  rgw_obj_in_trash.index_hash_source = obj.key.name; // trash obj and original obj should in same shard
+
+  rgw_rados_ref obj_in_trash_ref;
+  r = store->get_obj_head_ref(dpp, target->get_bucket_info(), rgw_obj_in_trash, &obj_in_trash_ref);
+  if (r < 0) {
+    return r;
+  }
+
+  ObjectWriteOperation del_op;
+  list<string> prefixes;
+  cls_rgw_remove_obj(del_op, prefixes);
+  auto& ioctx = obj_in_trash_ref.pool.ioctx();
+  r = rgw_rados_operate(dpp, ioctx, obj_in_trash_ref.obj.oid, &del_op, null_yield);
+  if (r < 0 && r != -ENOENT) {
+    ldpp_dout(dpp, 1) << "ERROR failed to delete stale trashed obj head:" << rgw_obj_in_trash.key.name << " r: " << r << dendl;
+  }
+
+  rgw_cls_bi_entry entry_in_trash_bin;
+  entry_in_trash_bin.type = BIIndexType::Plain;
+  entry_in_trash_bin.idx = rgw_obj_in_trash.key.name;
+  r = store->bi_ent_remove(dpp, target->get_bucket_info().bucket, rgw_obj_in_trash, entry_in_trash_bin, 0, false, NULL);
+  if (r < 0) {
+    ldpp_dout(dpp, 0) << "ERROR: failed to delete stale trashed obj bucket index entry:" << rgw_obj_in_trash.key.name << " r:" << r << dendl;
+  }
+
+  return 0;
+}
+
 int RGWRados::Object::Delete::rename_bi_entry_to_trash_bin(const DoutPrefixProvider *dpp){
   RGWRados *store = target->get_store();
   rgw_obj& obj = target->get_obj();
@@ -7057,6 +7096,10 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
     int ret = index_op.cancel(dpp, params.remove_objs);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "ERROR: index_op.cancel() returned ret=" << ret << dendl;
+    }
+    if (!update_quota_stats) {
+      // head and bi entry copied to trash bin, now we need clear it
+      revert_head_and_bi_from_trash_bin(y, dpp);
     }
   }
 

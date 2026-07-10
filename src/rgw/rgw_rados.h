@@ -1366,6 +1366,7 @@ public:
       int delete_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int restore_obj(optional_yield y, const DoutPrefixProvider *dpp);
       int copy_head_and_bi_to_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
+      int revert_head_and_bi_from_trash_bin(optional_yield y, const DoutPrefixProvider *dpp);
       int rename_bi_entry_to_trash_bin(const DoutPrefixProvider *dpp);
       int rename_bi_entry_from_trash_bin(const DoutPrefixProvider *dpp, rgw_obj& trash_obj, bufferlist &trash_obj_tag, rgw_obj& origin_obj);
       bool origin_obj_existence_check(const DoutPrefixProvider *dpp, rgw_obj &obj, rgw_raw_obj &raw_obj, optional_yield y);
