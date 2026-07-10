@@ -11555,7 +11555,13 @@ int RGWRados::cls_bucket_list_unordered(const DoutPrefixProvider *dpp,
         }
         current_shard = svc.bi_rados->bucket_shard_index(index_hash_source, num_shards);
       } else {
-        current_shard = svc.bi_rados->bucket_shard_index(obj_key.name, num_shards);
+        if (with_trash_reserved_prefix(obj_key.name)){
+          u_int8_t obj_name_len = obj_key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+          string origin_obj_name = obj_key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+          current_shard = svc.bi_rados->bucket_shard_index(origin_obj_name, num_shards);
+        }else {
+          current_shard = svc.bi_rados->bucket_shard_index(obj_key.name, num_shards);
+        }
       }
     }
   }
