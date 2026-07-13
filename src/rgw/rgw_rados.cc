@@ -3832,17 +3832,18 @@ int RGWConcurrentGetObjState::issue_op(uint64_t *psize, ceph::real_time *pmtime,
     return r;
   }
 
-  if (bi_entry_ret_code < 0 ) {
-    ldpp_dout(dpp, 0) << "WARNING: obj [" << head_oid << " ] error when fetch bucket index entry state r: " << bi_entry_ret_code << dendl;
+  if (bi_entry_ret_code < 0  && bi_entry_ret_code!= -ENOENT) {
+    ldpp_dout(dpp, 0) << "ERROR: obj [" << head_oid << " ] error when fetch bucket index entry state r: " << bi_entry_ret_code << dendl;
     return bi_entry_ret_code;
   }
-
   rgw_bucket_dir_entry dirent;
-  auto iter = result_from_bi_entry.entry.data.cbegin();
-  try {
-    decode(dirent, iter);
-  } catch (buffer::error &err) {
-    return -EIO;
+  if (bi_entry_ret_code >= 0 ) {
+    auto iter = result_from_bi_entry.entry.data.cbegin();
+    try {
+      decode(dirent, iter);
+    } catch (buffer::error &err) {
+      return -EIO;
+    }
   }
 
   ldpp_dout(dpp, 20) << "bucket index entry of obj [" << head_oid << " ] inlined : " << dirent.meta.inline_head << dendl;
