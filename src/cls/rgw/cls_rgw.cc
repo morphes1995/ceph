@@ -1137,10 +1137,19 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     return -EINVAL;
   }
 
-  CLS_LOG(1, "rgw_bucket_complete_op(): request: op=%d name=%s instance=%s ver=%lu:%llu tag=%s",
+  /*
+   * After big obj head and bi entry moved to trash bin , and before this complete op processing,
+   * the bi entry may be modified by tiny object (rgw_bucket_atomic complete op), which may lead bucket stats inaccurate
+   * we need to handle this, there are 3 cases:
+   *  1) bi entry was overwritten by tiny object with index epoch greater than us
+   *  2) bi entry was overwritten by tiny object with index epoch smaller than us
+   *  3) bi entry was deleted(overwritten by tiny object and then moved to trash bin)
+   */
+  bool move_to_trash_complete = (op.op == CLS_RGW_OP_DEL && !op.update_quota_stats);
+  CLS_LOG(1, "rgw_bucket_complete_op(): request: op=%d name=%s instance=%s ver=%lu:%llu tag=%s move_to_trash_complete=%d",
           op.op, op.key.name.c_str(), op.key.instance.c_str(),
           (unsigned long)op.ver.pool, (unsigned long long)op.ver.epoch,
-          op.tag.c_str());
+          op.tag.c_str(), move_to_trash_complete);
 
   rgw_bucket_dir_header header;
   int rc = read_bucket_header(hctx, &header);
@@ -1180,6 +1189,15 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     entry.pending_map.erase(pinter);
   }
 
+  if(move_to_trash_complete){
+    CLS_LOG(10, "INFO, %s: move_to_trash_complete=1, op.ver.epoch:%ld entry.ver.epoch:%ld entry_already_inline=%d"
+                " pending_index_epoch:%ld entry_index_epoch:%ld entry.exists=%d, entry.size=%ld"
+                " entry.pendings=%ld entry.head_size=%ld\n",
+            __func__, op.ver.epoch, entry.ver.epoch, entry_already_inline,
+            pending_index_epoch,  entry.meta.inline_index_epoch, entry.exists, entry.meta.size,
+            entry.pending_map.size(), entry.meta.head_data_size);
+  }
+
   if (op.tag.size() && op.op == CLS_RGW_OP_CANCEL) {
     CLS_LOG(1, "rgw_bucket_complete_op(): cancel requested\n");
   } else if (op.ver.pool == entry.ver.pool &&
@@ -1195,6 +1213,18 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
                  " inline_index_epoch: %ld, pending_index_epoch: %ld , key: %s \n", op.op, entry.meta.inline_index_epoch, pending_index_epoch, op.key.name.c_str());
       op.op = CLS_RGW_OP_CANCEL;
       entry.may_have_stale_head = true;
+      // case 1:
+      if (move_to_trash_complete){
+        rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
+        stats.num_entries++;
+        stats.total_size += op.meta.accounted_size;
+        stats.total_size_rounded += cls_rgw_get_rounded_size(op.meta.accounted_size);
+        stats.actual_size += op.meta.size;
+        CLS_LOG(10, "WARNING: %s: op: %d, object [%s] head and bi entry moved to trash bin,"
+                    " but before this complete op, the bi entry was modified (overwritten by tiny object) and release the disk occupation, "
+                    " we need to recover the space occupation (%ld) now! \n"
+        , __func__, op.op, entry.key.name.c_str(), op.meta.size);
+      }
     }
   }
 
@@ -1238,6 +1268,11 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     // unaccount deleted/overwritten entry
     if (op.update_quota_stats){
       unaccount_entry(header, entry);
+      if(entry.exists){
+        rgw_bucket_category_stats& stats = header.stats[entry.meta.category];
+        CLS_LOG(20, "%s:  unaccount stats, shard:%d, op: %d, key: %s, size: %ld, stats.num:%ld, stats.size:%ld"
+        , __func__, cls_current_shard_id(hctx), op.op, entry.key.name.c_str(), entry.meta.size, stats.num_entries, stats.actual_size);
+      }
     }
 
     // record stale fragment in merge object, will be vacuumed in background
@@ -1263,6 +1298,33 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     }
 
     if (op.op == CLS_RGW_OP_DEL) {
+      // case 2:
+      if (move_to_trash_complete && entry.exists && entry.meta.inline_head){
+        rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
+        stats.total_size += op.meta.accounted_size;
+        stats.total_size_rounded += cls_rgw_get_rounded_size(op.meta.accounted_size);
+        stats.actual_size += op.meta.size;
+
+        stats.total_size -= entry.meta.accounted_size;
+        stats.total_size_rounded -= cls_rgw_get_rounded_size(entry.meta.accounted_size);
+        stats.actual_size -= entry.meta.size;
+        CLS_LOG(10, "WARNING: %s: op: %d, object [%s] head and bi entry moved to trash bin,"
+                    " but before this complete op, the bi entry was modified (overwritten by tiny object), "
+                    " we need to adjust the space occupation (%ld) ! \n"
+        , __func__, op.op, entry.key.name.c_str(), op.meta.size - entry.meta.size);
+      }
+      // case 3:
+      if (move_to_trash_complete && !entry.exists){
+        rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
+        stats.total_size += op.meta.accounted_size;
+        stats.total_size_rounded += cls_rgw_get_rounded_size(op.meta.accounted_size);
+        stats.actual_size += op.meta.size;
+        CLS_LOG(10, "WARNING: %s: op: %d, object [%s] head and bi entry moved to trash bin,"
+                    " but before this complete op, the bi entry was deleted (overwritten then move to trash bin), "
+                    " we need to recover the space occupation (%ld) ! \n"
+        , __func__, op.op, entry.key.name.c_str(), op.meta.size - entry.meta.size);
+      }
+
       entry.meta = op.meta;
       if (!ondisk) {
         // no entry to erase
@@ -1299,6 +1361,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
       entry.key = op.key;
       entry.exists = true;
       entry.tag = op.tag;
+      entry.may_have_stale_head = false;
       if (op.update_quota_stats){
         rgw_bucket_category_stats& stats = header.stats[meta.category];
         // account for new entry
@@ -3470,11 +3533,18 @@ static int rgw_inlined_bi_rename_op(cls_method_context_t hctx, bufferlist *in, b
     return -EINVAL;
   }
 
+  rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header\n", __func__);
+    return -EINVAL;
+  }
+
   cls_rgw_obj_key key;
   key.name = op.src_name;
   std::string entry_idx;
   rgw_bucket_dir_entry entry;
-  int rc = read_key_entry(hctx, key, &entry_idx, &entry);
+  rc = read_key_entry(hctx, key, &entry_idx, &entry);
   if (rc < 0) {
     return rc;
   }
@@ -3487,17 +3557,31 @@ static int rgw_inlined_bi_rename_op(cls_method_context_t hctx, bufferlist *in, b
     return -ECANCELED;
   }
   if(!op.to_trash){
-    cls_rgw_obj_key key;
-    key.name = op.dest_name;
-    std::string entry_idx;
-    rgw_bucket_dir_entry entry;
-    int rc = read_key_entry(hctx, key, &entry_idx, &entry);
-    if (rc >= 0 && entry.exists) {
+    cls_rgw_obj_key dest_key;
+    dest_key.name = op.dest_name;
+    std::string dest_entry_idx;
+    rgw_bucket_dir_entry dest_entry;
+    int rc2 = read_key_entry(hctx, dest_key, &dest_entry_idx, &dest_entry);
+    if (rc2 >= 0 && dest_entry.exists) {
       CLS_LOG(10, "WARNING: %s:  target obj exists, restore obj from trash bin cancelled, key: %s", __func__, op.dest_name.c_str());
       return -ECANCELED;
     }
   }
-
+  bool no_pending_op = entry.pending_map.empty();
+  bool may_have_stale_head = entry.may_have_stale_head;
+  string old_sc = entry.meta.storage_class;
+  rgw_bucket_dir_entry prepare_entry;
+  if(!no_pending_op || may_have_stale_head){
+    prepare_entry.key = entry.key;
+    prepare_entry.ver = entry.ver;
+    prepare_entry.meta = rgw_bucket_dir_entry_meta(); //empty the meta
+    prepare_entry.meta.storage_class= old_sc;
+    prepare_entry.meta.inline_head = true;
+    prepare_entry.exists = false;
+    prepare_entry.meta.inline_index_epoch = cls_current_version(hctx);
+    prepare_entry.pending_map = entry.pending_map;
+    prepare_entry.may_have_stale_head = entry.may_have_stale_head;
+  }
   // 1. rename inlined bi entry
   if(op.to_trash){
     bufferlist origin_mtime_bl;
@@ -3518,9 +3602,18 @@ static int rgw_inlined_bi_rename_op(cls_method_context_t hctx, bufferlist *in, b
   if (rc < 0)
     return rc;
 
-  rc = cls_cxx_map_remove_key(hctx, entry_idx);
-  if (rc < 0) {
-    return rc;
+  if(no_pending_op && !may_have_stale_head){
+    rc = cls_cxx_map_remove_key(hctx, entry_idx);
+    if (rc < 0) {
+      return rc;
+    }
+  }else{
+    // we need to reserve a tmp src entry, let the pending op complete or stale head be deleted
+    bufferlist prepare_entry_bl;
+    encode(prepare_entry, prepare_entry_bl);
+    rc = cls_cxx_map_set_val(hctx, op.src_name, &prepare_entry_bl);
+    if (rc < 0)
+      return rc;
   }
 
   string src_inlined_index_key;
@@ -3538,14 +3631,29 @@ static int rgw_inlined_bi_rename_op(cls_method_context_t hctx, bufferlist *in, b
     if (rc < 0) {
       return rc;
     }
+  }
 
+  if(no_pending_op && !may_have_stale_head){
     rc = cls_cxx_map_remove_key(hctx, src_inlined_index_key);
     if (rc < 0) {
       return rc;
     }
+  }else{
+    // reserve a tmp src entry index, let detacher see it
+    rgw_bucket_inlined_entry_index index_val;
+    index_val.entry_size = 0;
+    index_val.delete_marker = true;
+    bufferlist index_val_bl;
+    encode(index_val, index_val_bl);
+    rc = cls_cxx_map_set_val(hctx, src_inlined_index_key, &index_val_bl);
+    if (rc < 0) {
+      return rc;
+    }
+    rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
+    stats.inlined_entry_num ++;
   }
 
-  return 0;
+  return write_bucket_header(hctx, &header);
 }
 
 static int rgw_inlined_bi_set_attrs_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)

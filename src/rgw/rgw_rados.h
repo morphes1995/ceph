@@ -1489,7 +1489,7 @@ public:
 		   list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false, bool update_quota_stats = true, bool avoid_log_op = false);
       int complete_del(const DoutPrefixProvider *dpp, 
                        int64_t poolid, uint64_t epoch,
-                       ceph::real_time& removed_mtime, /* mtime of removed object */
+                       ceph::real_time& removed_mtime, /* mtime of removed object */ uint64_t deleted_account_size, uint64_t deleted_size,
                        list<rgw_obj_index_key> *remove_objs,
                        bool update_quota_stats = true);
       int cancel(const DoutPrefixProvider *dpp,
@@ -1969,7 +1969,8 @@ public:
                            RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);
   int cls_obj_complete_del(BucketShard& bs, string& tag, int64_t pool, uint64_t epoch, rgw_obj& obj,
-                           ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
+                           ceph::real_time& removed_mtime, uint64_t deleted_account_size, uint64_t deleted_size,
+                           list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true);
   int cls_obj_complete_del_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, string& tag, rgw_obj& obj,
                            ceph::real_time& removed_mtime, list<rgw_obj_index_key> *remove_objs,

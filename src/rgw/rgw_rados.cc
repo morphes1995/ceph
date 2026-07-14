@@ -7087,7 +7087,8 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
       tombstone_entry entry{*state};
       obj_tombstone_cache->add(obj, entry);
     }
-    r = index_op.complete_del(dpp, poolid, ioctx.get_last_version(), state->mtime, params.remove_objs, update_quota_stats);
+    r = index_op.complete_del(dpp, poolid, ioctx.get_last_version(), state->mtime, state->accounted_size, state->size,
+                              params.remove_objs, update_quota_stats);
 
     int ret = target->complete_atomic_modification(dpp);
     if (ret < 0) {
@@ -7401,7 +7402,7 @@ int RGWRados::delete_obj_index(const rgw_obj& obj, ceph::real_time mtime, const 
   RGWRados::Bucket bop(this, bucket_info);
   RGWRados::Bucket::UpdateIndex index_op(&bop, obj);
 
-  return index_op.complete_del(dpp, -1 /* pool */, 0, mtime, NULL);
+  return index_op.complete_del(dpp, -1 /* pool */, 0, mtime, 0, 0, NULL);
 }
 
 static void generate_fake_tag(const DoutPrefixProvider *dpp, rgw::sal::RGWStore* store, map<string, bufferlist>& attrset, RGWObjManifest& manifest, bufferlist& manifest_bl, bufferlist& tag_bl)
@@ -8481,6 +8482,8 @@ int RGWRados::Bucket::UpdateIndex::complete(const DoutPrefixProvider *dpp, int64
 int RGWRados::Bucket::UpdateIndex::complete_del(const DoutPrefixProvider *dpp, 
                                                 int64_t poolid, uint64_t epoch,
                                                 real_time& removed_mtime,
+                                                uint64_t deleted_account_size,
+                                                uint64_t deleted_size,
                                                 list<rgw_obj_index_key> *remove_objs,
                                                 bool update_quota_stats)
 {
@@ -8496,7 +8499,8 @@ int RGWRados::Bucket::UpdateIndex::complete_del(const DoutPrefixProvider *dpp,
     return ret;
   }
 
-  ret = store->cls_obj_complete_del(*bs, optag, poolid, epoch, obj, removed_mtime, remove_objs, bilog_flags, zones_trace, update_quota_stats);
+  ret = store->cls_obj_complete_del(*bs, optag, poolid, epoch, obj, removed_mtime, deleted_account_size, deleted_size,
+                                    remove_objs, bilog_flags, zones_trace, update_quota_stats);
 
   int r = store->svc.datalog_rados->add_entry(dpp, target->bucket_info, bs->shard_id);
   if (r < 0) {
@@ -11064,6 +11068,8 @@ int RGWRados::cls_obj_complete_del(BucketShard& bs, string& tag,
                                    int64_t pool, uint64_t epoch,
                                    rgw_obj& obj,
                                    real_time& removed_mtime,
+                                   uint64_t deleted_account_size,
+                                   uint64_t deleted_size,
                                    list<rgw_obj_index_key> *remove_objs,
                                    uint16_t bilog_flags,
                                    rgw_zone_set *zones_trace,
@@ -11071,6 +11077,10 @@ int RGWRados::cls_obj_complete_del(BucketShard& bs, string& tag,
 {
   rgw_bucket_dir_entry ent;
   ent.meta.mtime = removed_mtime;
+  if(!update_quota_stats){
+    ent.meta.accounted_size = deleted_account_size;
+    ent.meta.size = deleted_size;
+  }
   obj.key.get_index_key(&ent.key);
   return cls_obj_complete_op(bs, obj, CLS_RGW_OP_DEL, tag, pool, epoch,
 			     ent, RGWObjCategory::None, remove_objs,
