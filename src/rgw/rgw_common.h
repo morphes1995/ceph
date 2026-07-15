@@ -1045,9 +1045,9 @@ struct RGWBucketInfo {
   int trash_obj_expired_days{0}; // 0 means obj in trash bin never expired
 
   int bucket_stats_refresh_interval{10};
-  int max_quota_pct_to_allow_inline{80};
-  int tiny_object_size_kb_threshold{128};
-  int inlined_obj_max_size_mb{0};
+  int max_quota_pct_to_allow_inline{75};
+  int tiny_object_size_kb_threshold{32};
+  int inlined_obj_max_size_mb{1024};
 
   void encode(bufferlist& bl) const;
   void decode(bufferlist::const_iterator& bl);

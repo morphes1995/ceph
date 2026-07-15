@@ -407,7 +407,8 @@ void usage()
   cout << "                             object deletions by not involving GC\n";
   cout << "   --stats-refresh-interval  interval to refresh rgw stats cache from rados\n";
   cout << "   --max-quota-pct           max percent of quota usage to allow tiny object inline\n";
-  cout << "   --tiny-obj-size_kb           object smaller than this will inline to bucket index entry\n";
+  cout << "   --tiny-obj-size_kb        object smaller than this will inline to bucket index entry\n";
+  cout << "   --inlined_obj_max_size_mb max inlined entry total size in mb\n";
   cout << "   --inconsistent-index      when specified with bucket deletion and bypass-gc set to true,\n";
   cout << "                             ignores bucket index consistency\n";
   cout << "   --min-rewrite-size        min object size for bucket rewrite (default 4M)\n";

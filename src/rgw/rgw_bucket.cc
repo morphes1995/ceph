@@ -1257,7 +1257,7 @@ int RGWBucket::obj_inline_config(RGWBucketAdminOpState &op_state, const DoutPref
     }
     bucket_info.tiny_object_size_kb_threshold = op_state.tiny_obj_size_kb;
   }
-  if (op_state.inlined_obj_max_size_mb >= 0 ) {
+  if (op_state.inlined_obj_max_size_mb > 0 ) {
     bucket_info.inlined_obj_max_size_mb = op_state.inlined_obj_max_size_mb;
   }
 
@@ -1537,8 +1537,10 @@ int RGWBucketAdminOp::set_obj_inline(rgw::sal::RGWRadosStore *store, RGWBucketAd
   RGWBucket bucket;
 
   int ret = bucket.init(store, op_state, null_yield, dpp);
-  if (ret < 0)
+  if (ret < 0){
+    set_err_msg(err_msg, "bucket init failed: " + cpp_strerror(ret));
     return ret;
+  }
   return bucket.set_obj_inline(op_state, dpp, err_msg);
 }
 int RGWBucketAdminOp::obj_inline_config(rgw::sal::RGWRadosStore *store, RGWBucketAdminOpState& op_state, const DoutPrefixProvider *dpp, string *err_msg)
@@ -1546,8 +1548,10 @@ int RGWBucketAdminOp::obj_inline_config(rgw::sal::RGWRadosStore *store, RGWBucke
   RGWBucket bucket;
 
   int ret = bucket.init(store, op_state, null_yield, dpp);
-  if (ret < 0)
+  if (ret < 0){
+    set_err_msg(err_msg, "bucket init failed: " + cpp_strerror(ret));
     return ret;
+  }
   return bucket.obj_inline_config(op_state, dpp, err_msg);
 }
 

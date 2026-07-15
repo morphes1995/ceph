@@ -6077,12 +6077,12 @@ std::vector<Option> get_rgw_options() {
                     "Number of Detacher tasks that will run in parallel "),
 
     Option("rgw_detach_max_wp_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(2)
+            .set_default(4)
             .set_description("Number of workpool threads per DCWorker")
             .set_long_description("Number of workpool threads per DCWorker"),
 
     Option("rgw_detach_list_batch_num", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(512)
+            .set_default(128)
             .set_description("Number of inlined object number for a list op")
             .set_long_description("Number of inlined object number for a list op"),
     Option("rgw_detach_lease_hold_interval_ms", Option::TYPE_INT, Option::LEVEL_ADVANCED)
@@ -6096,7 +6096,7 @@ std::vector<Option> get_rgw_options() {
             .add_see_also("osd_max_object_size"),
 
     Option("rgw_vacuum_process_period_sec", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
-            .set_default(3600)
+            .set_default(7200)
             .set_min(10)
             .set_description("rgw vacuum thread cycle run time")
             .set_long_description("rgw vacuum thread cycle run time"),
