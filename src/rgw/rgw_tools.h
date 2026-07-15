@@ -266,6 +266,6 @@ using RGWDataAccessRef = std::shared_ptr<RGWDataAccess>;
 /// calls and error handling.
 void rgw_complete_aio_completion(librados::AioCompletion* c, int r);
 
-bool with_trash_reserved_prefix(string &obj_path);
+bool with_trash_reserved_prefix(const string &obj_path);
 
 #endif

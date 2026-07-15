@@ -7497,10 +7497,16 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
 
   if (!assume_noent) {
     if (obj.key.get_ns() != "multipart"){
+      string index_hash_source = obj.key.name;
+      if(with_trash_reserved_prefix(obj.key.name)){
+        u_int16_t obj_name_len = obj.key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
+        index_hash_source = obj.key.name.substr(sizeof(RGW_TRASH_RESERVATION_PREFIX) - 1, obj_name_len);
+      }
+
       RGWSI_RADOS::Obj bucket_obj;
       int shard_id = -1;
       r = store->svc()->bi_rados->open_bucket_index_shard(dpp, bucket_info,
-                                                          obj.get_hash_object(),
+                                                          index_hash_source,
                                                           &bucket_obj,
                                                           &shard_id);
       if (r < 0) {
