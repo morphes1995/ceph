@@ -7496,7 +7496,7 @@ int RGWRados::get_obj_state_impl(const DoutPrefixProvider *dpp, RGWObjectCtx *rc
   int r = -ENOENT;
 
   if (!assume_noent) {
-    if (obj.key.get_ns() != "multipart"){
+    if (!bucket_info.tiny_obj_inline_disabled() && obj.key.get_ns() != "multipart"){
       string index_hash_source = obj.key.name;
       if(with_trash_reserved_prefix(obj.key.name)){
         u_int16_t obj_name_len = obj.key.name.size() - (sizeof(RGW_TRASH_RESERVATION_PREFIX)-1) - 43;
