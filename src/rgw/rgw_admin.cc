@@ -2932,6 +2932,10 @@ public:
       cerr << "ERROR: could not init bucket: " << cpp_strerror(-ret) << std::endl;
       return ret;
     }
+    if (!bucket_info.tiny_obj_inline_disabled()){
+      cerr << "ERROR: bucket " << bucket_info.bucket.name << " obj inline status is not disabled !, pipe can't be created." << std::endl;
+      return EINVAL;
+    }
 
     owner = bucket_info.owner;
 

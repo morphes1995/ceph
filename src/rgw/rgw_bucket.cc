@@ -1182,6 +1182,11 @@ int RGWBucket::set_obj_inline(RGWBucketAdminOpState &op_state, const DoutPrefixP
     return r;
   }
 
+  if(bucket_info.sync_policy.has_value() && !((*bucket_info.sync_policy).empty())){
+    set_err_msg(err_msg, "ERROR bucket " + bucket.name + " has configured sync policy, obj inline can't enabled !");
+    return -EINVAL;
+  }
+
   if (bucket_info.versioned()){
     set_err_msg(err_msg, "could not set object inline, because of bucket was versioned!");
     return -EINVAL;
