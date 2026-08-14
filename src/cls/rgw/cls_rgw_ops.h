@@ -174,6 +174,25 @@ struct rgw_cls_obj_complete_op
 };
 WRITE_CLASS_ENCODER(rgw_cls_obj_complete_op)
 
+
+struct rgw_cls_obj_complete_op_batch
+{
+    std::list<rgw_cls_obj_complete_op> ops;
+    rgw_cls_obj_complete_op_batch() {}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(ops, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl)
+        decode(ops, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_obj_complete_op_batch)
+
 struct rgw_cls_set_attrs_op
 {
   string key;
