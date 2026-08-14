@@ -1107,6 +1107,10 @@ void RGWRados::finalize()
   delete reshard;
   delete index_completion_manager;
 
+  if(run_op_cache_thread){
+    delete op_cache;
+  }
+
   rgw::notify::shutdown();
 }
 
@@ -1324,6 +1328,12 @@ int RGWRados::init_complete(const DoutPrefixProvider *dpp)
     lc->start_processor();
 
   quota_handler = RGWQuotaHandler::generate_handler(dpp, this->store, quota_threads);
+
+  if(run_op_cache_thread){
+    op_cache = new RGWPutOpCache(cct, cct->_conf->rgw_op_cache_thread_pool_size);
+    op_cache->start();
+  }
+
   dc = new RGWRadosDetacher(dpp, this->store, use_detacher);
 
   bucket_index_max_shards = (cct->_conf->rgw_override_bucket_index_max_shards ? cct->_conf->rgw_override_bucket_index_max_shards :
@@ -4283,7 +4293,9 @@ int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &di
 }
 
 void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge){
+  int total_size = 0;
   for (auto &dirent: entries_to_merge) {
+    total_size += dirent.meta.size;
     ceph_assert(dirent.meta.inline_head);
     if(dirent.may_have_stale_head){
       int r = try_clear_stale_head(shardItem, dirent);
@@ -4305,7 +4317,7 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, 
       return;
     }
     auto after_merge = ceph_clock_now();
-    ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_merge.size()  << ", time taken: "<< (after_merge - before_merge) << dendl;
+    ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_merge.size()  << ", size: " << total_size << " time taken: "<< (after_merge - before_merge) << dendl;
 
     bool async_clear = wk->ctx()->_conf.get_val<bool>("rgw_async_clear_inlined_entry_head_data");
     auto before_clear = ceph_clock_now();
@@ -4350,12 +4362,12 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
     d.size = entry.meta.head_data_size;
     entries_merged.emplace_back(d);
   }
-
-  (*merge_obj_name) = "evoc.merged.big.obj_" + to_string(shardItem.shard_id) + "_" + to_string(dir.header.current_merge_obj_ids[sc]) + "_0";
+  string effective_sc = sc == "" ? "STANDARD" : sc;
+  (*merge_obj_name) = "evoc.merged.big.obj_" + to_string(shardItem.shard_id) + "_" + to_string(dir.header.current_merge_obj_ids[effective_sc]) + "_0";
   rgw::sal::RGWRadosStore *store = get_store();
   rgw_obj merge_obj(shardItem.bucket, *merge_obj_name);
   rgw_rados_ref ref;
-  shardItem.placement_rule.storage_class = sc;
+  shardItem.placement_rule.storage_class = effective_sc;
   int r = store->getRados()->get_obj_head_ref(dpp, shardItem.placement_rule, merge_obj, &ref);
   if (r < 0){
     ldpp_dout(dpp, 1) << "ERROR DC WorkerQ[" << thr_name() << "] get merge rgw_rados_ref failed obj :" << merge_obj_name << " r: " << r << dendl;
@@ -8588,7 +8600,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_add(const DoutPrefixPro
   ent.meta.head_attrs = head_attrs;
 
   ret = guard_reshard(dpp, nullptr, [&](BucketShard *bs) -> int {
-            return store->cls_obj_complete_add_op_atomic(dpp, *bs, obj, optag,
+            return store->cls_obj_complete_add_op_atomic(dpp, store->cct->_conf->rgw_enable_tiny_obj_batch_write, *bs, obj, optag,
                                                          ent, category,
                                                          remove_objs, bilog_flags, zones_trace);
         });
@@ -11019,7 +11031,7 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
   return ret;
 }
 
-int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, BucketShard& bs, const rgw_obj& obj, string& tag,
+int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, bool batch_write, BucketShard& bs, const rgw_obj& obj, string& tag,
                                                  rgw_bucket_dir_entry& ent, RGWObjCategory category,
                                                  list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *_zones_trace)
 {
@@ -11056,10 +11068,50 @@ int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, Buck
     call.remove_objs = *remove_objs;
   call.zones_trace = zones_trace;
   call.update_quota_stats = true;
+
+  if(batch_write){
+    RGWPutRequest req(bs.bucket, bs.shard_id, bs.bucket_obj, call);
+    get_op_cache()->enqueue_req(&req);
+    req.wait_completion();
+
+    return req.ret_code;
+  }
+
   encode(call, in);
   o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP, in);
   int r = bs.bucket_obj.operate(dpp, &o,null_yield); // sync op
   return r;
+}
+
+void RGWPutOpCache::handle_request(const DoutPrefixProvider *dpp, RGWPutRequest *batch_req) {
+  auto before_batch_op = ceph_clock_now();
+  ObjectWriteOperation o;
+  o.assert_exists(); // bucket index shard must exist
+  rgw_cls_obj_complete_op_batch op_batch;
+  bufferlist in;
+  int total_size = 0;
+  for (auto r: *(batch_req->batch_reqs)) {
+    ldpp_dout(dpp, 10) << "deal with req , shard: " << r->shard_id << "key: " << r->op.key.name << dendl;
+    op_batch.ops.push_back(r->op);
+    total_size += r->op.meta.size;
+  }
+
+  encode(op_batch, in);
+  o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, in);
+  int ret = batch_req->bucket_obj.operate(dpp, &o,null_yield);
+  if(ret<0){
+    ldpp_dout(dpp, 1) << __func__ << " ERROR when submit batch ops, r:" << ret << dendl;
+  }
+
+  for (auto r: *(batch_req->batch_reqs)) {
+    r->ret_code = ret;
+    r->notify_req_done();
+  }
+
+  delete batch_req;
+
+  auto after_batch_op = ceph_clock_now();
+  ldpp_dout(dpp, 20) << op_batch.ops.size() << " put ops batch committed to osd, size: " << total_size << " time taken: "<< (after_batch_op - before_batch_op) << dendl;
 }
 
 int RGWRados::cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag,

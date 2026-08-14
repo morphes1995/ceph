@@ -6110,6 +6110,16 @@ std::vector<Option> get_rgw_options() {
            .set_description("when tiny object merged to big rados object, clear inlined entry head data asynchronously")
            .set_long_description("when tiny object merged to big rados object, clear inlined entry head data asynchronously"),
 
+  Option("rgw_enable_tiny_obj_batch_write", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+          .set_default(true)
+          .set_description("rgw tiny object write ops send to osd in batch"),
+  Option("rgw_tiny_obj_write_op_max_batch_cnt", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
+          .set_default(1024)
+          .set_description("max tiny obj write op count of one batch"),
+  Option("rgw_op_cache_thread_pool_size", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
+          .set_default(8)
+          .set_description("size of thread pool that used to batch commit rgw put ops"),
+
     Option("rgw_mp_lock_max_time", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(600)
     .set_description("Multipart upload max completion time")

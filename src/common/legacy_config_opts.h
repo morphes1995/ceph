@@ -1598,3 +1598,7 @@ OPTION(rgw_merge_object_max_size_mb, OPT_INT)
 OPTION(rgw_async_clear_inlined_entry_head_data, OPT_BOOL)
 OPTION(rgw_vacuum_process_period_sec, OPT_U64)
 OPTION(rgw_vacuum_threshold_pct, OPT_DOUBLE)
+
+OPTION(rgw_enable_tiny_obj_batch_write, OPT_BOOL)
+OPTION(rgw_tiny_obj_write_op_max_batch_cnt, OPT_U64)
+OPTION(rgw_op_cache_thread_pool_size, OPT_U64)

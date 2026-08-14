@@ -1401,36 +1401,10 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   return write_bucket_header(hctx, &header);
 } // rgw_bucket_complete_op
 
-int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
-{
-  CLS_LOG(10, "entered %s", __func__);
-  // decode request
-  rgw_cls_obj_complete_op op;
-  auto iter = in->cbegin();
-  try {
-    decode(op, iter);
-  } catch (ceph::buffer::error& err) {
-    CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): failed to decode request\n");
-    return -EINVAL;
-  }
-
-  CLS_LOG(1, "rgw_bucket_complete_atomic_op(): request: op=%d name=%s instance=%s ver=%lu:%llu tag=%s "
-             "inline_head=%d head_data_len=%d head_attrs_len=%ld",
-          op.op, op.key.name.c_str(), op.key.instance.c_str(),
-          (unsigned long)op.ver.pool, (unsigned long long)op.ver.epoch,
-          op.tag.c_str(),
-          op.meta.inline_head ,op.meta.head_data.length(), op.meta.head_attrs.size());
-
-  rgw_bucket_dir_header header;
-  int rc = read_bucket_header(hctx, &header);
-  if (rc < 0) {
-    CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): failed to read header\n");
-    return -EINVAL;
-  }
-
+static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucket_dir_header &header, rgw_cls_obj_complete_op &op){
   rgw_bucket_dir_entry entry;
   std::string idx;
-  rc = read_key_entry(hctx, op.key, &idx, &entry);
+  int rc = read_key_entry(hctx, op.key, &idx, &entry);
   if (rc < 0 && rc != -ENOENT) {
     return rc;
   }
@@ -1621,6 +1595,73 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     rc = complete_remove_obj(hctx, header, remove_key, default_log_op);
     if (rc < 0) {
       continue; // part cleanup errors are not fatal
+    }
+  }
+
+  return 0;
+}
+
+int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s", __func__);
+  // decode request
+  rgw_cls_obj_complete_op op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): failed to decode request\n");
+    return -EINVAL;
+  }
+
+  CLS_LOG(1, "rgw_bucket_complete_atomic_op(): request: op=%d name=%s instance=%s ver=%lu:%llu tag=%s "
+             "inline_head=%d head_data_len=%d head_attrs_len=%ld",
+          op.op, op.key.name.c_str(), op.key.instance.c_str(),
+          (unsigned long)op.ver.pool, (unsigned long long)op.ver.epoch,
+          op.tag.c_str(),
+          op.meta.inline_head ,op.meta.head_data.length(), op.meta.head_attrs.size());
+
+  rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op(): failed to read header\n");
+    return -EINVAL;
+  }
+
+  int ret = do_rgw_bucket_complete_atomic_op(hctx, header, op);
+  if(ret < 0){
+    return ret;
+  }
+
+  return write_bucket_header(hctx, &header);
+}
+
+int rgw_bucket_complete_atomic_op_batch(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s", __func__);
+  // decode request
+  rgw_cls_obj_complete_op_batch op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request\n", __func__);
+    return -EINVAL;
+  }
+
+  CLS_LOG(10, "rgw_bucket_complete_atomic_op_batch(): handle %d ops", op.ops.size());
+
+  rgw_bucket_dir_header header;
+  int rc = read_bucket_header(hctx, &header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op_batch(): failed to read header\n");
+    return -EINVAL;
+  }
+
+  for (auto &op: op.ops){
+    rc = do_rgw_bucket_complete_atomic_op(hctx, header, op);
+    if(rc < 0){
+      return rc;
     }
   }
 
@@ -6124,6 +6165,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_bucket_prepare_op;
   cls_method_handle_t h_rgw_bucket_complete_op;
   cls_method_handle_t h_rgw_bucket_complete_atomic_op;
+  cls_method_handle_t h_rgw_bucket_complete_atomic_op_batch;
   cls_method_handle_t h_rgw_bucket_link_olh;
   cls_method_handle_t h_rgw_bucket_unlink_instance_op;
   cls_method_handle_t h_rgw_bucket_read_olh_log;
@@ -6191,6 +6233,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BUCKET_PREPARE_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_prepare_op, &h_rgw_bucket_prepare_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_op, &h_rgw_bucket_complete_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_ATOMIC_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_atomic_op, &h_rgw_bucket_complete_atomic_op);
+  cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_atomic_op_batch, &h_rgw_bucket_complete_atomic_op_batch);
   cls_register_cxx_method(h_class, RGW_BUCKET_LINK_OLH, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_link_olh, &h_rgw_bucket_link_olh);
   cls_register_cxx_method(h_class, RGW_BUCKET_UNLINK_INSTANCE, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_unlink_instance, &h_rgw_bucket_unlink_instance_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_READ_OLH_LOG, CLS_METHOD_RD, rgw_bucket_read_olh_log, &h_rgw_bucket_read_olh_log);
