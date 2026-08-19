@@ -4119,16 +4119,15 @@ void *DCWorkQ::entry() {
 
     int num_entries = wk->ctx()->_conf->rgw_detach_list_batch_num;
     int hold_interval = wk->ctx()->_conf->rgw_detach_lease_hold_interval_ms;
+    bool first_list = true;
+    uint32_t start_offset = 0;
     bool truncated = true;
-    cls_rgw_obj_key start_obj;
-    string sc;
     while (truncated) {
       rgw_cls_list_ret result;
       librados::ObjectReadOperation op;
       cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
       auto before_list = ceph_clock_now();
-      cls_rgw_bucket_inlined_entry_list_op(op, start_obj,sc,
-                                           num_entries, shardItem.rgw_instance, hold_interval, &result);
+      cls_rgw_bucket_inlined_entry_list_op(op, first_list, start_offset, shardItem.rgw_instance, hold_interval, &result);
       r = rgw_rados_operate(dpp, ioctx, oid, &op, nullptr, null_yield);
       if(r == -ECANCELED){
         // we lost the shard lease
@@ -4154,11 +4153,6 @@ void *DCWorkQ::entry() {
 
       auto after_list = ceph_clock_now();
       ldpp_dout(dpp, 20) << "cls_rgw_bucket_inlined_entry_list_op items:" << result.dir.m.size() << " time taken: "<< (after_list - before_list) << dendl;
-
-      truncated = result.is_truncated;
-      start_obj = result.marker;
-      sc = result.marker_sc;
-
       ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance
                         << " read [" << result.dir.m.size() <<"] entries from shard " << shardItem.oid  <<dendl;
 
@@ -4169,8 +4163,12 @@ void *DCWorkQ::entry() {
       }
 
       for (auto &item: entries_grouped_by_sc){
-        batch_detach_and_merge(shardItem, result.dir, item.first, item.second);
+        batch_detach_and_merge(shardItem, result, item.first, item.second);
       }
+
+      truncated = result.is_truncated;
+      start_offset = result.next_offset;
+      first_list = false;
     } // listed all shard inlined objects
 
   }// going done while
@@ -4292,11 +4290,10 @@ int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &di
   return r;
 }
 
-void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge){
+void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_cls_list_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge){
   int total_size = 0;
   for (auto &dirent: entries_to_merge) {
     total_size += dirent.meta.size;
-    ceph_assert(dirent.meta.inline_head);
     if(dirent.may_have_stale_head){
       int r = try_clear_stale_head(shardItem, dirent);
       if(r < 0){
@@ -4310,7 +4307,7 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, 
   if(!entries_to_merge.empty()){
     auto before_merge = ceph_clock_now();
     string merge_obj_name;
-    r = _merge_heads_payload(shardItem, dir, entries_to_merge, entries_merged, sc, &merge_obj_name, &merged_obj_size);
+    r = _merge_heads_payload(shardItem, result.dir, entries_to_merge, entries_merged, sc, &merge_obj_name, &merged_obj_size);
     ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << "  merge heads data of bucket: " << shardItem.bucket.name
                        << " shard:" << shardItem.oid << " obj cnt " << entries_to_merge.size() << " r:" << r <<dendl;
     if (r < 0){
@@ -4319,13 +4316,15 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, 
     auto after_merge = ceph_clock_now();
     ldpp_dout(dpp, 20) << "_rebuild_head_async items: " << entries_to_merge.size()  << ", size: " << total_size << " time taken: "<< (after_merge - before_merge) << dendl;
 
-    bool async_clear = wk->ctx()->_conf.get_val<bool>("rgw_async_clear_inlined_entry_head_data");
+//    bool async_clear = wk->ctx()->_conf.get_val<bool>("rgw_async_clear_inlined_entry_head_data");
+    bool async_clear = false;
     auto before_clear = ceph_clock_now();
     librados::ObjectWriteOperation op;
     string oid = shardItem.oid;
     librados::IoCtx ioctx = shardItem.index_pool_io_ctx;
     cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
-    cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_merged, sc, merge_obj_name, merged_obj_size, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
+    cls_rgw_bucket_clear_inlined_entry_data_op(op, entries_merged, sc, merge_obj_name, merged_obj_size,
+                                               result.start_offset, result.next_offset, wk->ctx()->_conf->rgw_merge_object_max_size_mb);
     if(async_clear){
       clear_op_data *entry = new clear_op_data();
       entry->dpp = dpp;
@@ -6405,8 +6404,9 @@ static void accumulate_raw_stats(const rgw_bucket_dir_header& header,
     s.size_utilized += header_stats.actual_size;
     s.num_objects += header_stats.num_entries;
 
-    s.inlined_entry_num += header_stats.inlined_entry_num;
-    s.inlined_total_entry_size += header_stats.inlined_total_entry_size;
+//    s.inlined_entry_num += header_stats.inlined_entry_num;
+//    s.inlined_total_entry_size += header_stats.inlined_total_entry_size;
+    s.inlined_total_entry_size += (header.queue_tail - header.queue_head);
   }
 }
 

@@ -558,6 +558,51 @@ struct rgw_bucket_dir_entry {
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 
+struct rgw_bucket_inlined_entry_meta {
+    cls_rgw_obj_key key;
+    std::string tag;
+    ceph::real_time mtime;
+    uint64_t inline_index_epoch{0};
+    uint32_t size{0};
+    string sc;
+    bool delete_marker{false};
+    bool may_have_stale_head{false};
+
+    rgw_bucket_inlined_entry_meta(){}
+    rgw_bucket_inlined_entry_meta(cls_rgw_obj_key _key, std::string _tag, ceph::real_time _mtime,
+                                  uint64_t _inline_index_epoch, uint32_t _size, string _sc, bool _delete_marker, bool _may_have_stale_head)
+                                  :key(_key), tag(_tag), mtime(_mtime), inline_index_epoch(_inline_index_epoch), size(_size),
+                                  sc(_sc), delete_marker(_delete_marker), may_have_stale_head(_may_have_stale_head){}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(key, bl);
+        encode(tag, bl);
+        encode(mtime, bl);
+        encode(inline_index_epoch, bl);
+        encode(size, bl);
+        encode(sc, bl);
+        encode(delete_marker, bl);
+        encode(may_have_stale_head, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(key, bl);
+        decode(tag, bl);
+        decode(mtime, bl);
+        decode(inline_index_epoch, bl);
+        decode(size, bl);
+        decode(sc, bl);
+        decode(delete_marker, bl);
+        decode(may_have_stale_head, bl);
+      DECODE_FINISH(bl);
+    }
+
+    void dump(ceph::Formatter *f) const;
+};
+WRITE_CLASS_ENCODER(rgw_bucket_inlined_entry_meta)
+
 struct rgw_bucket_inlined_entry_index {
     uint64_t entry_size;
     bool delete_marker;
@@ -808,6 +853,7 @@ struct rgw_bucket_category_stats {
   uint64_t total_size_rounded;
   uint64_t num_entries;
   uint64_t actual_size{0}; //< account for compression, encryption
+  // todo remove this 2 fields
   uint64_t inlined_entry_num;
   uint64_t inlined_total_entry_size;
 
@@ -1132,10 +1178,13 @@ struct rgw_bucket_dir_header {
   std::map<string, uint32_t> current_merge_obj_ids;
   rgw_merge_object_stats merge_obj_stats;
 
+  uint32_t queue_head{0};
+  uint32_t queue_tail{0};
+
   rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false){}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(8, 2, bl);
+    ENCODE_START(9, 2, bl);
     encode(stats, bl);
     encode(tag_timeout, bl);
     encode(ver, bl);
@@ -1147,6 +1196,9 @@ struct rgw_bucket_dir_header {
     encode(acquire_time, bl);
     encode(current_merge_obj_ids, bl);
     encode(merge_obj_stats, bl);
+
+    encode(queue_head, bl);
+    encode(queue_tail, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -1179,6 +1231,11 @@ struct rgw_bucket_dir_header {
       decode(acquire_time, bl);
       decode(current_merge_obj_ids, bl);
       decode(merge_obj_stats, bl);
+    }
+
+    if (struct_v >= 9){
+      decode(queue_head, bl);
+      decode(queue_tail, bl);
     }
     DECODE_FINISH(bl);
   }

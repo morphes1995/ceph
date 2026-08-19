@@ -469,14 +469,14 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
                             rgw_cls_list_ret* result);
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
-                                          const cls_rgw_obj_key& start_obj, string &sc,
-                                          uint32_t num_entries, string &rgw_instance, int hold_interval,
+                                          bool first_list, uint32_t start_offset, string &rgw_instance, int hold_interval,
                                           rgw_cls_list_ret* result);
 
 void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance, int lease_hold_interval);
 
 void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries,
-                                                const string &sc, string &merge_obj_name, uint32_t merged_obj_size, uint32_t rgw_merge_object_max_size_mb);
+                                                const string &sc, string &merge_obj_name, uint32_t merged_obj_size,
+                                                uint32_t start_offset, uint32_t next_offset, uint32_t rgw_merge_object_max_size_mb);
 
 void cls_rgw_bilog_list(librados::ObjectReadOperation& op,
                         const std::string& marker, uint32_t max,

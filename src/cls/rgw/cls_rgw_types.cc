@@ -245,6 +245,17 @@ void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("may_have_stale_head", may_have_stale_head, obj);
 }
 
+void rgw_bucket_inlined_entry_meta::dump(Formatter *f) const
+{
+  encode_json("name", key.name, f);
+  encode_json("instance", key.instance , f);
+  encode_json("tag", tag , f);
+  encode_json("mtime", mtime , f);
+  encode_json("inline_index_epoch", inline_index_epoch , f);
+  encode_json("size", size , f);
+  encode_json("delete_marker", delete_marker , f);
+}
+
 void rgw_bucket_inlined_entry_index::dump(Formatter *f) const
 {
   encode_json("entry_size", entry_size, f);
@@ -750,6 +761,9 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
   f->close_section();
 
   merge_obj_stats.dump(f);
+
+  f->dump_int("queue_head", queue_head);
+  f->dump_int("queue_tail", queue_tail);
 }
 
 void rgw_merge_object_stat::dump(Formatter *f) const {

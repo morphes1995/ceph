@@ -353,6 +353,8 @@ void rgw_cls_clear_inlined_data_op::dump(Formatter *f) const
   encode_json("merged_obj_size", merged_obj_size, f);
   encode_json("rgw_merge_object_max_size_mb", rgw_merge_object_max_size_mb, f);
   encode_json("entries", entries, f);
+  encode_json("start_offset", start_offset, f);
+  encode_json("next_offset", next_offset, f);
 }
 
 void rgw_cls_check_index_ret::generate_test_instances(list<rgw_cls_check_index_ret*>& o)

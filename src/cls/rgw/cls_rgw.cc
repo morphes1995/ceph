@@ -70,6 +70,9 @@ static const std::string BI_PREFIX_BEGIN = string(1, BI_PREFIX_CHAR);
 static const std::string BI_PREFIX_END = string(1, BI_PREFIX_CHAR) +
     bucket_index_prefixes[BI_BUCKET_LAST_INDEX];
 
+constexpr unsigned int QUEUE_ENTRY_START = 0xABCD;
+const uint64_t LIST_CHUNK_SIZE = 1ul << 22;
+
 /* Returns whether parameter is not a key for a special entry. Empty
  * strings are considered plain also, so, for example, an empty marker
  * is also considered plain. TODO: check to make sure all callers are
@@ -1401,7 +1404,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   return write_bucket_header(hctx, &header);
 } // rgw_bucket_complete_op
 
-static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucket_dir_header &header, rgw_cls_obj_complete_op &op){
+static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucket_dir_header &header, rgw_cls_obj_complete_op &op, bufferlist &queue_data){
   rgw_bucket_dir_entry entry;
   std::string idx;
   int rc = read_key_entry(hctx, op.key, &idx, &entry);
@@ -1438,15 +1441,6 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       }
     }
 
-    // update inlined entry stats
-    if(entry.meta.inline_head && entry.meta.merge_obj_name.empty()){
-      rgw_bucket_category_stats& stats = header.stats[RGWObjCategory::Main];
-      stats.inlined_entry_num --;
-      if(entry.exists){
-        stats.inlined_total_entry_size -= entry.meta.size;
-      }
-    }
-
     bool may_have_stale_head = entry.may_have_stale_head;
     if(entry.exists && !entry.meta.inline_head){
       may_have_stale_head = true;
@@ -1454,12 +1448,24 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
     entry.may_have_stale_head = may_have_stale_head;
 
     entry.key = op.key;
-    entry.meta = op.meta;
-    entry.meta.inline_index_epoch = cls_current_version(hctx);
     entry.locator = op.locator;
     entry.index_ver = header.ver;
     entry.exists = true;
     entry.tag = op.tag;
+    op.meta.inline_index_epoch = cls_current_version(hctx);
+    uint16_t entry_start = QUEUE_ENTRY_START;
+    encode(entry_start, queue_data); // 1. encode magic number
+
+    rgw_bucket_inlined_entry_meta entry_meta(entry.key, entry.tag, op.meta.mtime,
+                                             op.meta.inline_index_epoch, op.meta.size, op.meta.storage_class, false, entry.may_have_stale_head);
+    encode(entry_meta, queue_data);// 2. encode meta part
+
+    int bl_len = queue_data.length();
+    CLS_LOG(10, "INFO, %s encode rgw_bucket_inlined_entry_meta, key: %s, shard %d, header queue tail: %d, queue entry meta part len: %d",
+            __func__, entry.key.name.c_str(), cls_current_shard_id(hctx), header.queue_tail, bl_len);
+    queue_data.claim_append(std::move(op.meta.head_data)); // 3. encode data part
+    entry.meta = op.meta;
+    entry.meta.offset = header.queue_tail + bl_len; // 4. update data part location
 
     rgw_bucket_dir_entry_meta& meta = op.meta;
     rgw_bucket_category_stats& stats = header.stats[meta.category];
@@ -1470,9 +1476,6 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
       stats.actual_size += meta.size;
     }
-    // update inlined entry stats
-    stats.inlined_entry_num ++;
-    stats.inlined_total_entry_size += meta.size;
 
     bufferlist new_key_bl;
     encode(entry, new_key_bl);
@@ -1481,28 +1484,6 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       return rc;
     }
 
-    if(op.meta.storage_class != old_sc){
-      std::string old_inlined_index_key;
-      encode_inlined_entry_key(old_sc, entry.key.name, &old_inlined_index_key);
-      rc = cls_cxx_map_remove_key(hctx, old_inlined_index_key);
-      if (rc < 0 && rc != -ENOENT){
-        CLS_LOG(1, "WARNING: %s: old inlined index key %s deletion failed, old sc:%s, new sc: %s", __func__,
-                old_inlined_index_key.c_str(), old_sc.c_str(), op.meta.storage_class.c_str());
-      }
-    }
-    // insert inlined entry index key, for fast list all inlined entries in this shard
-    std::string inlined_entry_key;
-    encode_inlined_entry_key(op.meta.storage_class, op.key.name, &inlined_entry_key);
-
-    rgw_bucket_inlined_entry_index index_val;
-    index_val.entry_size = meta.size;
-    index_val.delete_marker = false;
-    bufferlist inlined_entry_idx_val;
-    encode(index_val, inlined_entry_idx_val);
-    rc = cls_cxx_map_set_val(hctx, inlined_entry_key, &inlined_entry_idx_val);
-    if (rc < 0) {
-      return rc;
-    }
   }// CLS_RGW_OP_ADD
   else if (op.op == CLS_RGW_OP_DEL){
     if (!entry.exists){
@@ -1563,19 +1544,13 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
         return rc;
       }
 
-      // insert inlined entry index key, for fast list all inlined entries in this shard
-      std::string inlined_entry_key;
-      encode_inlined_entry_key(old_sc, op.key.name, &inlined_entry_key);
+      uint16_t entry_start = QUEUE_ENTRY_START;
+      encode(entry_start, queue_data);
 
-      rgw_bucket_inlined_entry_index index_val;
-      index_val.entry_size = entry.meta.size;
-      index_val.delete_marker = true;
-      bufferlist inlined_entry_idx_val;
-      encode(index_val, inlined_entry_idx_val);
-      rc = cls_cxx_map_set_val(hctx, inlined_entry_key, &inlined_entry_idx_val);
-      if (rc < 0) {
-        return rc;
-      }
+      bufferlist  entry_meta_bl;
+      rgw_bucket_inlined_entry_meta entry_meta(entry.key, entry.tag, entry.meta.mtime,
+                                               entry.meta.inline_index_epoch, entry.meta.size, old_sc, true, entry.may_have_stale_head);
+      encode(entry_meta, queue_data);
     }
   } // CLS_RGW_OP_DEL
 
@@ -1628,7 +1603,8 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
     return -EINVAL;
   }
 
-  int ret = do_rgw_bucket_complete_atomic_op(hctx, header, op);
+  bufferlist queue_data;
+  int ret = do_rgw_bucket_complete_atomic_op(hctx, header, op, queue_data);
   if(ret < 0){
     return ret;
   }
@@ -1649,7 +1625,7 @@ int rgw_bucket_complete_atomic_op_batch(cls_method_context_t hctx, bufferlist *i
     return -EINVAL;
   }
 
-  CLS_LOG(10, "rgw_bucket_complete_atomic_op_batch(): handle %d ops", op.ops.size());
+  CLS_LOG(10, "rgw_bucket_complete_atomic_op_batch(): handle %ld ops", op.ops.size());
 
   rgw_bucket_dir_header header;
   int rc = read_bucket_header(hctx, &header);
@@ -1658,14 +1634,149 @@ int rgw_bucket_complete_atomic_op_batch(cls_method_context_t hctx, bufferlist *i
     return -EINVAL;
   }
 
+  bufferlist queue_data;
   for (auto &op: op.ops){
-    rc = do_rgw_bucket_complete_atomic_op(hctx, header, op);
+    rc = do_rgw_bucket_complete_atomic_op(hctx, header, op, queue_data);
     if(rc < 0){
       return rc;
     }
   }
 
+  CLS_LOG(10, "INFO: rgw_bucket_complete_atomic_op_batch(): write %d bytes to shard obj data \n", queue_data.length());
+  //write data size and data at tail offset
+  auto ret = cls_cxx_write2(hctx, header.queue_tail, queue_data.length(), &queue_data, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+  if (ret < 0) {
+    return ret;
+  }
+  header.queue_tail += queue_data.length();
+
   return write_bucket_header(hctx, &header);
+}
+
+int rgw_bucket_list_inlined_entry_from_shard_data(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s()\n", __func__);
+
+  auto iter = in->cbegin();
+  rgw_cls_inlined_entry_list_op op;
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request", __func__);
+    return -EINVAL;
+  }
+
+  rgw_cls_list_ret ret;
+  rgw_bucket_dir& new_dir = ret.dir;
+  auto& name_entry_map = new_dir.m; // map of keys to entries
+
+  int rc = read_bucket_header(hctx, &new_dir.header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
+    return rc;
+  }
+
+  if (new_dir.header.queue_head == new_dir.header.queue_tail) {
+    ret.is_truncated = false;
+    encode(ret, *out);
+    return 0;
+  }
+
+  auto interval = std::chrono::duration<int, std::ratio<1, 1000>>(op.lease_hold_interval_ms);
+  utime_t  give_up (new_dir.header.acquire_time+interval);
+  utime_t  now(ceph::real_clock::now());
+  CLS_LOG(20, "%s: , holder: %s give up time: %ld, now: %ld interval_ms: %d", __func__, new_dir.header.rgw_instance_hold_lease.c_str(),
+          give_up.to_msec(), now.to_msec() ,op.lease_hold_interval_ms);
+  if (new_dir.header.rgw_instance_hold_lease != op.rgw_instance ||
+      new_dir.header.acquire_time + interval < ceph::real_clock::now()){
+    CLS_LOG(10, "WARNING: %s:  rgw %s failed to acquire shard list lease", __func__, op.rgw_instance.c_str());
+    return -ECANCELED;
+  }
+
+  uint32_t start_offset = op.first_list? new_dir.header.queue_head : op.start_offset;
+  ret.start_offset = start_offset;
+  //Read chunk size at a time
+  int size_to_read = 0;
+  if(new_dir.header.queue_tail - start_offset <= LIST_CHUNK_SIZE){
+    size_to_read = new_dir.header.queue_tail - start_offset;
+    ret.is_truncated = false;
+  }else{
+    size_to_read = LIST_CHUNK_SIZE;
+    ret.is_truncated = true;
+  }
+  CLS_LOG(10, "INFO: %s(): start_queue_offset is %d, size_to_read: %d ", __func__ , start_offset, size_to_read);
+
+  bufferlist bl_chunk;
+  rc = cls_cxx_read(hctx, start_offset, size_to_read, &bl_chunk);
+  if (rc < 0) {
+    return rc;
+  }
+
+  //Process the chunk of data read
+  int num_entry = 0;
+  auto it = bl_chunk.cbegin();
+  uint32_t meta_size = sizeof(uint16_t) + sizeof(rgw_bucket_dir_entry);
+  uint32_t data_processed = it.get_off();
+  do {
+    rgw_bucket_dir_entry entry;
+    uint16_t entry_start = 0;
+
+    uint32_t left = bl_chunk.length() - it.get_off();
+    if( left < meta_size ){
+      CLS_LOG(10, "INFO: %s(): tail %d bytes of data can not decode meta info ", __func__, left);
+      break;
+    }
+
+    // 1. Decode magic number at start
+    try {
+      decode(entry_start, it);
+    } catch (const ceph::buffer::error& err) {
+      CLS_LOG(10, "ERROR: %s: failed to decode entry start: %s", __func__ , err.what());
+      return -EINVAL;
+    }
+    if (entry_start != QUEUE_ENTRY_START) {
+      CLS_LOG(5, "ERROR: %s: invalid entry start %u", __func__ , entry_start);
+      return -EINVAL;
+    }
+
+    // 2. decode meta part
+    rgw_bucket_inlined_entry_meta entry_meta;
+    try {
+      decode(entry_meta, it);
+    } catch (const ceph::buffer::error& err) {
+      CLS_LOG(10, "ERROR: %s: failed to decode meta part: %s", __func__, err.what());
+      return -EINVAL;
+    }
+    entry.key = entry_meta.key;
+    entry.meta.size = entry_meta.size;
+    entry.meta.inline_index_epoch = entry_meta.inline_index_epoch;
+    entry.meta.mtime = entry_meta.mtime;
+    entry.tag = entry_meta.tag;
+    entry.meta.storage_class = entry_meta.sc;
+    entry.exists = entry_meta.delete_marker;
+    entry.may_have_stale_head = entry_meta.may_have_stale_head;
+
+    left = bl_chunk.length() - it.get_off();
+    if(left < entry.meta.size){
+      CLS_LOG(10, "INFO: %s(): tail %d bytes of data can not decode entry head data ", __func__, left);
+      break;
+    }
+
+    // 3. decode data part
+    it.copy(entry.meta.size, entry.meta.head_data);
+    entry.meta.head_data_size  = entry_meta.size;
+
+    name_entry_map[entry.key.name] = entry;
+    data_processed = it.get_off();
+    num_entry++;
+  } while(it != bl_chunk.end());
+
+  ret.next_offset = start_offset + data_processed;
+
+  encode(ret, *out);
+  CLS_LOG(10, "INFO: %s, return num_entries: %d , data processed: %d bytes \n", __func__ , num_entry, data_processed);
+
+  return 0;
 }
 
 int rgw_bucket_list_inlined_entry_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
@@ -1860,12 +1971,20 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
     CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
     return rc;
   }
-  rgw_bucket_category_stats &stats = header.stats[RGWObjCategory::Main];
+
+  // release shard data queue space
+  if(header.queue_head != op.start_offset){
+    CLS_LOG(10, "WARNING %s() stale clear op, shard %d, curr queue head: %d, op start offset %d, op next offset %d, "
+                "generate %ld stale frags \n",
+            __func__, cls_current_shard_id(hctx), header.queue_head, op.start_offset, op.next_offset, op.entries.size());
+    //todo
+    return 0;
+  }
+  CLS_LOG(10, "INFO %s() shard %d queue head change: %d -> %d\n",
+          __func__, cls_current_shard_id(hctx), header.queue_head,  op.next_offset);
+  header.queue_head = op.next_offset;
 
   for (auto &op_entry: op.entries){
-    std::string inlined_index_key;
-    encode_inlined_entry_key(op.sc, op_entry.key.name, &inlined_index_key);
-
     rgw_bucket_dir_entry entry;
     std::string entry_idx;
     rc = read_key_entry(hctx, op_entry.key, &entry_idx, &entry);
@@ -1884,10 +2003,6 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
 
     if (rc == -ENOENT || !entry.meta.inline_head){
       CLS_LOG(10, "WARNING: %s: entry %s didn't exist or not inlined ", __func__, op_entry.key.to_string().c_str());
-      rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
-      if (rc < 0 && rc != -ENOENT){
-        CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
-      }
       rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
       if (rc < 0) {
         return rc;
@@ -1900,8 +2015,8 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
     {
 
       if(!entry.meta.merge_obj_name.empty()){
-        CLS_LOG(10, "WARNING: %s: inlined index key %s head data already merged to %s:%d, data in %s:%d is redundant",
-                __func__, inlined_index_key.c_str(),
+        CLS_LOG(10, "WARNING: %s: inlined entry %s head data already merged to %s:%d, data in %s:%d is redundant",
+                __func__, entry.key.name.c_str(),
                 entry.meta.merge_obj_name.c_str(), entry.meta.offset, op.merge_obj_name.c_str(), op_entry.offset);
         // record stale fragment in merge object, will be vacuumed in background
         rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
@@ -1915,10 +2030,6 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
       encode_obj_index_key(op_entry.key, &entry_key);
       if (entry.exists){
         // inlined entry is still what we detached
-        // clear inlined head data
-        entry.meta.head_data.clear();
-        entry.meta.head_data_size = 0;
-
         // tiny object payload data position
         entry.meta.merge_obj_name = op.merge_obj_name;
         entry.meta.offset = op_entry.offset;
@@ -1951,18 +2062,8 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
         }
       }
 
-      stats.inlined_entry_num -= 1;
-      if (entry.exists){
-        stats.inlined_total_entry_size -= entry.meta.size;
-      }
-
-      rc = cls_cxx_map_remove_key(hctx, inlined_index_key);
-      if (rc < 0 && rc != -ENOENT){
-        CLS_LOG(1, "WARNING: %s: inlined index key %s deletion failed", __func__, inlined_index_key.c_str());
-      }
-
     } else {
-      CLS_LOG(10, "WARNING: %s: inlined index key %s was overwritten by other tiny obj ", __func__, inlined_index_key.c_str());
+      CLS_LOG(10, "WARNING: %s: inlined entry %s was overwritten by other tiny obj ", __func__, entry.key.name.c_str());
       rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
       if (rc < 0) {
         return rc;
@@ -3525,13 +3626,17 @@ static int rgw_bi_get_obj_stat_op(cls_method_context_t hctx, bufferlist *in, buf
     return -ECANCELED;
   }
 
-  if (op.prefetch_data){
-    entry.data = value;
-  }else {
-    // drop inlined head data ,then return
-    disk_entry.meta.head_data.clear();
-    encode(disk_entry, entry.data);
+  if (op.prefetch_data && disk_entry.meta.merge_obj_name.empty()){
+    // head payload data is still in shard obj data
+    bufferlist head_data;
+    auto ret = cls_cxx_read(hctx, disk_entry.meta.offset, disk_entry.meta.size, &head_data);
+    if (ret < 0) {
+      return ret;
+    }
+    disk_entry.meta.head_data = std::move(head_data);
   }
+
+  encode(disk_entry, entry.data);
 
   encode(op_ret, *out);
 
@@ -6223,7 +6328,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BUCKET_INIT_INDEX, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_init_index, &h_rgw_bucket_init_index);
   cls_register_cxx_method(h_class, RGW_BUCKET_SET_TAG_TIMEOUT, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_set_tag_timeout, &h_rgw_bucket_set_tag_timeout);
   cls_register_cxx_method(h_class, RGW_BUCKET_LIST, CLS_METHOD_RD, rgw_bucket_list, &h_rgw_bucket_list);
-  cls_register_cxx_method(h_class, RGW_BUCKET_INLINED_ENTRY_LIST, CLS_METHOD_RD, rgw_bucket_list_inlined_entry_op, &h_rgw_bucket_inlined_entry_list);
+  cls_register_cxx_method(h_class, RGW_BUCKET_INLINED_ENTRY_LIST, CLS_METHOD_RD, rgw_bucket_list_inlined_entry_from_shard_data, &h_rgw_bucket_inlined_entry_list);
   cls_register_cxx_method(h_class, RGW_BUCKET_SHARD_ACQUIRE_LEASE, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_shard_acquire_lease, &h_rgw_bucket_shard_acquire_lease);
   cls_register_cxx_method(h_class, RGW_BUCKET_CLEAR_INLINED_DATA, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_clear_entry_inlined_data_op, &h_rgw_bucket_clear_inlined_data);
   cls_register_cxx_method(h_class, RGW_BUCKET_CHECK_INDEX, CLS_METHOD_RD, rgw_bucket_check_index, &h_rgw_bucket_check_index);
