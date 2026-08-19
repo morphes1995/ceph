@@ -589,7 +589,9 @@ public:
 private:
     dequeue_result dequeue();
     void* entry() override;
-    void batch_detach_and_merge(ShardItem &shardItem, rgw_cls_inlined_entry_list_op_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
+    void decode_inlined_entry(bufferlist &data, list<rgw_bucket_dir_entry> &entries, uint32_t *data_processed);
+    void batch_detach_and_merge(ShardItem &shardItem, rgw_cls_inlined_entry_list_op_ret &result, uint32_t start_offset, uint32_t next_offset,
+                                         const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
     int try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent);
     int _merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir_header &header,
                              list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, const string &sc,

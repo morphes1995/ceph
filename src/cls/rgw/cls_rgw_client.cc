@@ -359,8 +359,8 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
 }
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
-                            bool first_list, uint32_t start_offset, string &rgw_instance, int hold_interval,
-                            rgw_cls_inlined_entry_list_op_ret* result)
+                                           bool first_list, uint32_t start_offset, string &rgw_instance, int hold_interval,
+                                           rgw_cls_inlined_entry_list_op_ret* result)
 {
   bufferlist in;
   rgw_cls_inlined_entry_list_op call;
