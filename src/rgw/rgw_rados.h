@@ -589,7 +589,7 @@ public:
 private:
     dequeue_result dequeue();
     void* entry() override;
-    void batch_detach_and_merge(ShardItem &shardItem, rgw_bucket_dir &dir, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
+    void batch_detach_and_merge(ShardItem &shardItem, rgw_cls_list_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
     int try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent);
     int _merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
                              list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, const string &sc,
@@ -904,6 +904,7 @@ protected:
           auto &shard_queue = curr_shard->second;
           RGWPutRequest *batch_req = NULL;
           int cnt = 0;
+          int size = 0;
           if (shard_queue.size() == 0){
             goto done;
           }
@@ -921,11 +922,12 @@ protected:
             batch_req->batch_reqs->push_back(r);
             shard_queue.pop_front();
             cnt ++;
+            size += r->op.meta.size;
           }
 
           done:
-            ldout(op_cache->cct, 10) << "batch dequeued requests, shard: " << curr_shard->first << " cnt: " << cnt
-                                     << "req cnt in shard queue: " << shard_queue.size() << dendl;
+            ldout(op_cache->cct, 10) << "batch dequeued requests, shard: " << curr_shard->first << " cnt: " << cnt << " size: " << size
+                                     << " req cnt in shard queue: " << shard_queue.size() << dendl;
             curr_shard++;
             if(curr_shard == op_cache->put_req_queue.end()){
               curr_shard = op_cache->put_req_queue.begin();

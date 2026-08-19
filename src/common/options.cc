@@ -4056,7 +4056,7 @@ std::vector<Option> get_global_options() {
     .set_description(""),
 
     Option("osd_max_object_size", Option::TYPE_SIZE, Option::LEVEL_ADVANCED)
-    .set_default(128_M)
+    .set_default(4095_M)
     .set_description(""),
 
     Option("osd_max_object_name_len", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
@@ -6071,7 +6071,7 @@ std::vector<Option> get_rgw_options() {
             .set_long_description(
                     "Time period for detach tiny objects inlined from bucket index entry to rados"),
     Option("rgw_detach_max_worker", Option::TYPE_INT, Option::LEVEL_ADVANCED)
-            .set_default(1)
+            .set_default(0)
             .set_description("Number of Detacher worker that will be run in parallel")
             .set_long_description(
                     "Number of Detacher tasks that will run in parallel "),
