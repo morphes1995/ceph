@@ -470,7 +470,7 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
                                           bool first_list, uint32_t start_offset, string &rgw_instance, int hold_interval,
-                                          rgw_cls_list_ret* result);
+                                          rgw_cls_inlined_entry_list_op_ret* result);
 
 void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance, int lease_hold_interval);
 
