@@ -589,9 +589,9 @@ public:
 private:
     dequeue_result dequeue();
     void* entry() override;
-    void batch_detach_and_merge(ShardItem &shardItem, rgw_cls_list_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
+    void batch_detach_and_merge(ShardItem &shardItem, rgw_cls_inlined_entry_list_op_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge);
     int try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &dirent);
-    int _merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
+    int _merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir_header &header,
                              list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, const string &sc,
                              /* out params */string *merge_obj_name, uint32_t *merged_obj_size);
 };

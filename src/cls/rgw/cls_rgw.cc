@@ -1666,39 +1666,37 @@ int rgw_bucket_list_inlined_entry_from_shard_data(cls_method_context_t hctx, buf
     return -EINVAL;
   }
 
-  rgw_cls_list_ret ret;
-  rgw_bucket_dir& new_dir = ret.dir;
-  auto& name_entry_map = new_dir.m; // map of keys to entries
+  rgw_cls_inlined_entry_list_op_ret ret;
 
-  int rc = read_bucket_header(hctx, &new_dir.header);
+  int rc = read_bucket_header(hctx, &ret.header);
   if (rc < 0) {
     CLS_LOG(1, "ERROR: %s: failed to read header", __func__);
     return rc;
   }
 
-  if (new_dir.header.queue_head == new_dir.header.queue_tail) {
+  if (ret.header.queue_head == ret.header.queue_tail) {
     ret.is_truncated = false;
     encode(ret, *out);
     return 0;
   }
 
   auto interval = std::chrono::duration<int, std::ratio<1, 1000>>(op.lease_hold_interval_ms);
-  utime_t  give_up (new_dir.header.acquire_time+interval);
+  utime_t  give_up (ret.header.acquire_time+interval);
   utime_t  now(ceph::real_clock::now());
-  CLS_LOG(20, "%s: , holder: %s give up time: %ld, now: %ld interval_ms: %d", __func__, new_dir.header.rgw_instance_hold_lease.c_str(),
+  CLS_LOG(20, "%s: , holder: %s give up time: %ld, now: %ld interval_ms: %d", __func__, ret.header.rgw_instance_hold_lease.c_str(),
           give_up.to_msec(), now.to_msec() ,op.lease_hold_interval_ms);
-  if (new_dir.header.rgw_instance_hold_lease != op.rgw_instance ||
-      new_dir.header.acquire_time + interval < ceph::real_clock::now()){
+  if (ret.header.rgw_instance_hold_lease != op.rgw_instance ||
+      ret.header.acquire_time + interval < ceph::real_clock::now()){
     CLS_LOG(10, "WARNING: %s:  rgw %s failed to acquire shard list lease", __func__, op.rgw_instance.c_str());
     return -ECANCELED;
   }
 
-  uint32_t start_offset = op.first_list? new_dir.header.queue_head : op.start_offset;
+  uint32_t start_offset = op.first_list? ret.header.queue_head : op.start_offset;
   ret.start_offset = start_offset;
   //Read chunk size at a time
   int size_to_read = 0;
-  if(new_dir.header.queue_tail - start_offset <= LIST_CHUNK_SIZE){
-    size_to_read = new_dir.header.queue_tail - start_offset;
+  if(ret.header.queue_tail - start_offset <= LIST_CHUNK_SIZE){
+    size_to_read = ret.header.queue_tail - start_offset;
     ret.is_truncated = false;
   }else{
     size_to_read = LIST_CHUNK_SIZE;
@@ -1706,17 +1704,20 @@ int rgw_bucket_list_inlined_entry_from_shard_data(cls_method_context_t hctx, buf
   }
   CLS_LOG(10, "INFO: %s(): start_queue_offset is %d, size_to_read: %d ", __func__ , start_offset, size_to_read);
 
+  uint64_t before_read = ceph_clock_now().to_msec();
   bufferlist bl_chunk;
   rc = cls_cxx_read(hctx, start_offset, size_to_read, &bl_chunk);
   if (rc < 0) {
     return rc;
   }
+  CLS_LOG(10, "INFO: %s read %d bytes time taken %ld ms", __func__ , bl_chunk.length(), ceph_clock_now().to_msec() - before_read);
 
   //Process the chunk of data read
   int num_entry = 0;
   auto it = bl_chunk.cbegin();
   uint32_t meta_size = sizeof(uint16_t) + sizeof(rgw_bucket_dir_entry);
   uint32_t data_processed = it.get_off();
+  uint64_t decode_start = ceph_clock_now().to_msec();
   do {
     rgw_bucket_dir_entry entry;
     uint16_t entry_start = 0;
@@ -1765,15 +1766,14 @@ int rgw_bucket_list_inlined_entry_from_shard_data(cls_method_context_t hctx, buf
     // 3. decode data part
     it.copy(entry.meta.size, entry.meta.head_data);
     entry.meta.head_data_size  = entry_meta.size;
-
-    name_entry_map[entry.key.name] = entry;
+    ret.entries.push_back(entry);
     data_processed = it.get_off();
     num_entry++;
   } while(it != bl_chunk.end());
-
   ret.next_offset = start_offset + data_processed;
 
   encode(ret, *out);
+  CLS_LOG(10, "INFO: %s decode %d bytes time taken %ld ms", __func__ , data_processed, ceph_clock_now().to_msec() - decode_start);
   CLS_LOG(10, "INFO: %s, return num_entries: %d , data processed: %d bytes \n", __func__ , num_entry, data_processed);
 
   return 0;
@@ -1984,14 +1984,17 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
           __func__, cls_current_shard_id(hctx), header.queue_head,  op.next_offset);
   header.queue_head = op.next_offset;
 
+  uint64_t read_key_time_taken = 0;
   for (auto &op_entry: op.entries){
     rgw_bucket_dir_entry entry;
     std::string entry_idx;
+    uint64_t before_read = ceph_clock_now().to_nsec();
     rc = read_key_entry(hctx, op_entry.key, &entry_idx, &entry);
     if (rc < 0 && rc != -ENOENT) {
       CLS_LOG(1, "ERROR: %s: failed to read entry %s, r: %d", __func__, op_entry.key.to_string().c_str(), rc);
       return rc;
     }
+    read_key_time_taken += ceph_clock_now().to_nsec() - before_read;
 
     /*
      * we need consider 4 cases here:
@@ -2070,6 +2073,7 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
       }
     }
   }
+  CLS_LOG(10, "INFO: %s read %ld key time taken %ld ns", __func__, op.entries.size(), read_key_time_taken);
 
   if(header.merge_obj_stats.merge_obj_exists(op.sc, op.merge_obj_name) &&
     header.merge_obj_stats.merge_obj_get(op.sc, op.merge_obj_name).size >= op.merged_obj_size){

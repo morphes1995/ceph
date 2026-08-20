@@ -479,6 +479,37 @@ struct rgw_cls_inlined_entry_list_op
 };
 WRITE_CLASS_ENCODER(rgw_cls_inlined_entry_list_op)
 
+struct rgw_cls_inlined_entry_list_op_ret {
+    rgw_bucket_dir_header header;
+    std::list <rgw_bucket_dir_entry> entries;
+    bool is_truncated;
+    uint32_t start_offset;
+    uint32_t next_offset;
+
+    rgw_cls_inlined_entry_list_op_ret() :
+            is_truncated(false){}
+
+    void encode(ceph::buffer::list &bl) const {
+      ENCODE_START(1, 1, bl);
+        encode(header, bl);
+        encode(entries, bl);
+        encode(is_truncated, bl);
+        encode(start_offset, bl);
+        encode(next_offset, bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(ceph::buffer::list::const_iterator &bl) {
+      DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
+        decode(header, bl);
+        decode(entries, bl);
+        decode(is_truncated, bl);
+        decode(start_offset, bl);
+        decode(next_offset, bl);
+      DECODE_FINISH(bl);
+    }
+};
+WRITE_CLASS_ENCODER(rgw_cls_inlined_entry_list_op_ret)
+
 struct rgw_cls_list_op
 {
   cls_rgw_obj_key start_obj;
@@ -546,9 +577,6 @@ struct rgw_cls_list_ret {
   cls_rgw_obj_key marker;
 
   string marker_sc;
-  uint32_t start_offset;
-  uint32_t next_offset;
-
   // cls_filtered is not transmitted; it is assumed true for versions
   // on/after 3 and false for prior versions; this allows the rgw
   // layer to know when an older osd (cls) does not do the filtering
@@ -560,13 +588,11 @@ struct rgw_cls_list_ret {
   {}
 
   void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(6, 2, bl);
+    ENCODE_START(5, 2, bl);
     encode(dir, bl);
     encode(is_truncated, bl);
     encode(marker, bl);
     encode(marker_sc, bl);
-    encode(start_offset, bl);
-    encode(next_offset, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -579,10 +605,6 @@ struct rgw_cls_list_ret {
     }
     if (struct_v >= 5) {
       decode(marker_sc, bl);
-    }
-    if (struct_v >= 6) {
-      decode(start_offset, bl);
-      decode(next_offset, bl);
     }
     DECODE_FINISH(bl);
   }

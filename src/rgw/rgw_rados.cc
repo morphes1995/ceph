@@ -4123,7 +4123,7 @@ void *DCWorkQ::entry() {
     uint32_t start_offset = 0;
     bool truncated = true;
     while (truncated) {
-      rgw_cls_list_ret result;
+      rgw_cls_inlined_entry_list_op_ret result;
       librados::ObjectReadOperation op;
       cls_rgw_guard_bucket_resharding(op, -ERR_BUSY_RESHARDING);
       auto before_list = ceph_clock_now();
@@ -4152,14 +4152,13 @@ void *DCWorkQ::entry() {
       }
 
       auto after_list = ceph_clock_now();
-      ldpp_dout(dpp, 20) << "cls_rgw_bucket_inlined_entry_list_op items:" << result.dir.m.size() << " time taken: "<< (after_list - before_list) << dendl;
+      ldpp_dout(dpp, 20) << "cls_rgw_bucket_inlined_entry_list_op items:" << result.entries.size() << " time taken: "<< (after_list - before_list) << dendl;
       ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance
-                        << " read [" << result.dir.m.size() <<"] entries from shard " << shardItem.oid  <<dendl;
+                        << " read [" << result.entries.size() <<"] entries from shard " << shardItem.oid  <<dendl;
 
       map<string, list<rgw_bucket_dir_entry>> entries_grouped_by_sc;
-      for (auto &entry: result.dir.m) {
-        rgw_bucket_dir_entry &dirent = entry.second;
-        entries_grouped_by_sc[dirent.meta.storage_class].push_back(dirent);
+      for (auto &entry: result.entries) {
+        entries_grouped_by_sc[entry.meta.storage_class].push_back(entry);
       }
 
       for (auto &item: entries_grouped_by_sc){
@@ -4290,7 +4289,7 @@ int DCWorkQ::try_clear_stale_head(ShardItem &shardItem, rgw_bucket_dir_entry &di
   return r;
 }
 
-void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_cls_list_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge){
+void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_cls_inlined_entry_list_op_ret &result, const string &sc, list<rgw_bucket_dir_entry> &entries_to_merge){
   int total_size = 0;
   for (auto &dirent: entries_to_merge) {
     total_size += dirent.meta.size;
@@ -4307,7 +4306,7 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_cls_list_ret &res
   if(!entries_to_merge.empty()){
     auto before_merge = ceph_clock_now();
     string merge_obj_name;
-    r = _merge_heads_payload(shardItem, result.dir, entries_to_merge, entries_merged, sc, &merge_obj_name, &merged_obj_size);
+    r = _merge_heads_payload(shardItem, result.header, entries_to_merge, entries_merged, sc, &merge_obj_name, &merged_obj_size);
     ldpp_dout(dpp, 20) << "DC WorkerQ[" << thr_name() << "] " << " rgw_instance: " << shardItem.rgw_instance << "  merge heads data of bucket: " << shardItem.bucket.name
                        << " shard:" << shardItem.oid << " obj cnt " << entries_to_merge.size() << " r:" << r <<dendl;
     if (r < 0){
@@ -4342,7 +4341,7 @@ void DCWorkQ::batch_detach_and_merge(ShardItem &shardItem, rgw_cls_list_ret &res
   }
 }
 
-int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
+int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir_header &header,
                                   list<rgw_bucket_dir_entry> &entries_to_detach, list<rgw_bucket_inlined_entry> &entries_merged, const string &sc,
                                   /* out params */string *merge_obj_name, uint32_t *merged_obj_size){
   bufferlist merged_bl;
@@ -4362,7 +4361,7 @@ int DCWorkQ::_merge_heads_payload(ShardItem &shardItem, rgw_bucket_dir &dir,
     entries_merged.emplace_back(d);
   }
   string effective_sc = sc == "" ? "STANDARD" : sc;
-  (*merge_obj_name) = "evoc.merged.big.obj_" + to_string(shardItem.shard_id) + "_" + to_string(dir.header.current_merge_obj_ids[effective_sc]) + "_0";
+  (*merge_obj_name) = "evoc.merged.big.obj_" + to_string(shardItem.shard_id) + "_" + to_string(header.current_merge_obj_ids[effective_sc]) + "_0";
   rgw::sal::RGWRadosStore *store = get_store();
   rgw_obj merge_obj(shardItem.bucket, *merge_obj_name);
   rgw_rados_ref ref;
