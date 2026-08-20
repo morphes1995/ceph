@@ -474,7 +474,7 @@ void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
 
 void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,string &rgw_instance, int lease_hold_interval);
 
-void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries,
+void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_dir_entry> &entries,
                                                 const string &sc, string &merge_obj_name, uint32_t merged_obj_size,
                                                 uint32_t start_offset, uint32_t next_offset, uint32_t rgw_merge_object_max_size_mb);
 

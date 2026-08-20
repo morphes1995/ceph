@@ -481,10 +481,9 @@ WRITE_CLASS_ENCODER(rgw_cls_inlined_entry_list_op)
 
 struct rgw_cls_inlined_entry_list_op_ret {
     rgw_bucket_dir_header header;
-    std::list <rgw_bucket_dir_entry> entries;
+    bufferlist data;
     bool is_truncated;
     uint32_t start_offset;
-    uint32_t next_offset;
 
     rgw_cls_inlined_entry_list_op_ret() :
             is_truncated(false){}
@@ -492,19 +491,17 @@ struct rgw_cls_inlined_entry_list_op_ret {
     void encode(ceph::buffer::list &bl) const {
       ENCODE_START(1, 1, bl);
         encode(header, bl);
-        encode(entries, bl);
+        encode(data, bl);
         encode(is_truncated, bl);
         encode(start_offset, bl);
-        encode(next_offset, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
       DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
         decode(header, bl);
-        decode(entries, bl);
+        decode(data, bl);
         decode(is_truncated, bl);
         decode(start_offset, bl);
-        decode(next_offset, bl);
       DECODE_FINISH(bl);
     }
 };
@@ -657,6 +654,7 @@ struct rgw_cls_clear_inlined_data_op {
     list<rgw_bucket_inlined_entry> entries;
     uint32_t start_offset;
     uint32_t next_offset;
+    list<rgw_bucket_dir_entry> entries2;
 
     void encode(ceph::buffer::list &bl) const {
       ENCODE_START(2, 1, bl);
@@ -667,6 +665,7 @@ struct rgw_cls_clear_inlined_data_op {
         encode(entries, bl);
         encode(start_offset, bl);
         encode(next_offset, bl);
+        encode(entries2, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
@@ -679,6 +678,7 @@ struct rgw_cls_clear_inlined_data_op {
         if (struct_v >= 2) {
           decode(start_offset, bl);
           decode(next_offset, bl);
+          decode(entries2, bl);
         }
       DECODE_FINISH(bl);
     }

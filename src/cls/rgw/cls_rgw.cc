@@ -70,7 +70,6 @@ static const std::string BI_PREFIX_BEGIN = string(1, BI_PREFIX_CHAR);
 static const std::string BI_PREFIX_END = string(1, BI_PREFIX_CHAR) +
     bucket_index_prefixes[BI_BUCKET_LAST_INDEX];
 
-constexpr unsigned int QUEUE_ENTRY_START = 0xABCD;
 const uint64_t LIST_CHUNK_SIZE = 1ul << 22;
 
 /* Returns whether parameter is not a key for a special entry. Empty
@@ -1446,26 +1445,26 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       may_have_stale_head = true;
     }
     entry.may_have_stale_head = may_have_stale_head;
-
     entry.key = op.key;
     entry.locator = op.locator;
     entry.index_ver = header.ver;
     entry.exists = true;
     entry.tag = op.tag;
-    op.meta.inline_index_epoch = cls_current_version(hctx);
-    uint16_t entry_start = QUEUE_ENTRY_START;
-    encode(entry_start, queue_data); // 1. encode magic number
+    entry.meta = op.meta;
+    entry.meta.inline_index_epoch = cls_current_version(hctx);
 
-    rgw_bucket_inlined_entry_meta entry_meta(entry.key, entry.tag, op.meta.mtime,
-                                             op.meta.inline_index_epoch, op.meta.size, op.meta.storage_class, false, entry.may_have_stale_head);
-    encode(entry_meta, queue_data);// 2. encode meta part
+    bufferlist head_data_bl = std::move(entry.meta.head_data);
+    uint16_t entry_start = SHARD_QUEUE_ENTRY_START;
+    encode(entry_start, queue_data); // 1. encode magic number
+    encode(entry, queue_data);// 2. encode meta part
 
     int bl_len = queue_data.length();
-    CLS_LOG(10, "INFO, %s encode rgw_bucket_inlined_entry_meta, key: %s, shard %d, header queue tail: %d, queue entry meta part len: %d",
-            __func__, entry.key.name.c_str(), cls_current_shard_id(hctx), header.queue_tail, bl_len);
-    queue_data.claim_append(std::move(op.meta.head_data)); // 3. encode data part
-    entry.meta = op.meta;
+    queue_data.claim_append(head_data_bl); // 3. encode data part
     entry.meta.offset = header.queue_tail + bl_len; // 4. update data part location
+    ceph_assert(entry.meta.head_data.length() == 0);
+
+    CLS_LOG(10, "INFO, %s encode rgw_bucket_inlined_entry_meta, key: %s, shard %d, header queue tail: %d, queue bl len: %d",
+            __func__, entry.key.name.c_str(), cls_current_shard_id(hctx), header.queue_tail, queue_data.length());
 
     rgw_bucket_dir_entry_meta& meta = op.meta;
     rgw_bucket_category_stats& stats = header.stats[meta.category];
@@ -1543,8 +1542,8 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       if (rc < 0) {
         return rc;
       }
-
-      uint16_t entry_start = QUEUE_ENTRY_START;
+      // todo
+      uint16_t entry_start = SHARD_QUEUE_ENTRY_START;
       encode(entry_start, queue_data);
 
       bufferlist  entry_meta_bl;
@@ -1691,90 +1690,26 @@ int rgw_bucket_list_inlined_entry_from_shard_data(cls_method_context_t hctx, buf
     return -ECANCELED;
   }
 
-  uint32_t start_offset = op.first_list? ret.header.queue_head : op.start_offset;
-  ret.start_offset = start_offset;
+  ret.start_offset = op.first_list? ret.header.queue_head : op.start_offset;
   //Read chunk size at a time
   int size_to_read = 0;
-  if(ret.header.queue_tail - start_offset <= LIST_CHUNK_SIZE){
-    size_to_read = ret.header.queue_tail - start_offset;
+  if(ret.header.queue_tail - ret.start_offset <= LIST_CHUNK_SIZE){
+    size_to_read = ret.header.queue_tail - ret.start_offset;
     ret.is_truncated = false;
   }else{
     size_to_read = LIST_CHUNK_SIZE;
     ret.is_truncated = true;
   }
-  CLS_LOG(10, "INFO: %s(): start_queue_offset is %d, size_to_read: %d ", __func__ , start_offset, size_to_read);
+  CLS_LOG(10, "INFO: %s(): start_queue_offset is %d, size_to_read: %d ", __func__ , ret.start_offset, size_to_read);
 
   uint64_t before_read = ceph_clock_now().to_msec();
-  bufferlist bl_chunk;
-  rc = cls_cxx_read(hctx, start_offset, size_to_read, &bl_chunk);
+  rc = cls_cxx_read(hctx, ret.start_offset, size_to_read, &ret.data);
   if (rc < 0) {
     return rc;
   }
-  CLS_LOG(10, "INFO: %s read %d bytes time taken %ld ms", __func__ , bl_chunk.length(), ceph_clock_now().to_msec() - before_read);
-
-  //Process the chunk of data read
-  int num_entry = 0;
-  auto it = bl_chunk.cbegin();
-  uint32_t meta_size = sizeof(uint16_t) + sizeof(rgw_bucket_dir_entry);
-  uint32_t data_processed = it.get_off();
-  uint64_t decode_start = ceph_clock_now().to_msec();
-  do {
-    rgw_bucket_dir_entry entry;
-    uint16_t entry_start = 0;
-
-    uint32_t left = bl_chunk.length() - it.get_off();
-    if( left < meta_size ){
-      CLS_LOG(10, "INFO: %s(): tail %d bytes of data can not decode meta info ", __func__, left);
-      break;
-    }
-
-    // 1. Decode magic number at start
-    try {
-      decode(entry_start, it);
-    } catch (const ceph::buffer::error& err) {
-      CLS_LOG(10, "ERROR: %s: failed to decode entry start: %s", __func__ , err.what());
-      return -EINVAL;
-    }
-    if (entry_start != QUEUE_ENTRY_START) {
-      CLS_LOG(5, "ERROR: %s: invalid entry start %u", __func__ , entry_start);
-      return -EINVAL;
-    }
-
-    // 2. decode meta part
-    rgw_bucket_inlined_entry_meta entry_meta;
-    try {
-      decode(entry_meta, it);
-    } catch (const ceph::buffer::error& err) {
-      CLS_LOG(10, "ERROR: %s: failed to decode meta part: %s", __func__, err.what());
-      return -EINVAL;
-    }
-    entry.key = entry_meta.key;
-    entry.meta.size = entry_meta.size;
-    entry.meta.inline_index_epoch = entry_meta.inline_index_epoch;
-    entry.meta.mtime = entry_meta.mtime;
-    entry.tag = entry_meta.tag;
-    entry.meta.storage_class = entry_meta.sc;
-    entry.exists = entry_meta.delete_marker;
-    entry.may_have_stale_head = entry_meta.may_have_stale_head;
-
-    left = bl_chunk.length() - it.get_off();
-    if(left < entry.meta.size){
-      CLS_LOG(10, "INFO: %s(): tail %d bytes of data can not decode entry head data ", __func__, left);
-      break;
-    }
-
-    // 3. decode data part
-    it.copy(entry.meta.size, entry.meta.head_data);
-    entry.meta.head_data_size  = entry_meta.size;
-    ret.entries.push_back(entry);
-    data_processed = it.get_off();
-    num_entry++;
-  } while(it != bl_chunk.end());
-  ret.next_offset = start_offset + data_processed;
 
   encode(ret, *out);
-  CLS_LOG(10, "INFO: %s decode %d bytes time taken %ld ms", __func__ , data_processed, ceph_clock_now().to_msec() - decode_start);
-  CLS_LOG(10, "INFO: %s, return num_entries: %d , data processed: %d bytes \n", __func__ , num_entry, data_processed);
+  CLS_LOG(10, "INFO: %s read %d bytes time taken %ld ms, ret.data len: %d", __func__ , out->length(), ceph_clock_now().to_msec() - before_read, ret.data.length());
 
   return 0;
 }
@@ -1976,26 +1911,15 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
   if(header.queue_head != op.start_offset){
     CLS_LOG(10, "WARNING %s() stale clear op, shard %d, curr queue head: %d, op start offset %d, op next offset %d, "
                 "generate %ld stale frags \n",
-            __func__, cls_current_shard_id(hctx), header.queue_head, op.start_offset, op.next_offset, op.entries.size());
-    //todo
+            __func__, cls_current_shard_id(hctx), header.queue_head, op.start_offset, op.next_offset, op.entries2.size());
+    //todo gen stale frags
     return 0;
   }
   CLS_LOG(10, "INFO %s() shard %d queue head change: %d -> %d\n",
           __func__, cls_current_shard_id(hctx), header.queue_head,  op.next_offset);
   header.queue_head = op.next_offset;
 
-  uint64_t read_key_time_taken = 0;
-  for (auto &op_entry: op.entries){
-    rgw_bucket_dir_entry entry;
-    std::string entry_idx;
-    uint64_t before_read = ceph_clock_now().to_nsec();
-    rc = read_key_entry(hctx, op_entry.key, &entry_idx, &entry);
-    if (rc < 0 && rc != -ENOENT) {
-      CLS_LOG(1, "ERROR: %s: failed to read entry %s, r: %d", __func__, op_entry.key.to_string().c_str(), rc);
-      return rc;
-    }
-    read_key_time_taken += ceph_clock_now().to_nsec() - before_read;
-
+  for (auto &entry: op.entries2){
     /*
      * we need consider 4 cases here:
      * 1. entry was already deleted
@@ -2004,38 +1928,38 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
      * 4. entry is still what we are detaching
      */
 
-    if (rc == -ENOENT || !entry.meta.inline_head){
-      CLS_LOG(10, "WARNING: %s: entry %s didn't exist or not inlined ", __func__, op_entry.key.to_string().c_str());
-      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
-      if (rc < 0) {
-        return rc;
-      }
-      continue;
-    }
+//    if (rc == -ENOENT || !entry.meta.inline_head){
+//      CLS_LOG(10, "WARNING: %s: entry %s didn't exist or not inlined ", __func__, op_entry.key.to_string().c_str());
+//      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
+//      if (rc < 0) {
+//        return rc;
+//      }
+//      continue;
+//    }
 
-    if(entry.meta.inline_index_epoch == op_entry.inline_index_epoch
-       && entry.tag == op_entry.tag)
-    {
+//    if(entry.meta.inline_index_epoch == op_entry.inline_index_epoch
+//       && entry.tag == op_entry.tag)
+//    {
 
-      if(!entry.meta.merge_obj_name.empty()){
-        CLS_LOG(10, "WARNING: %s: inlined entry %s head data already merged to %s:%d, data in %s:%d is redundant",
-                __func__, entry.key.name.c_str(),
-                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op.merge_obj_name.c_str(), op_entry.offset);
-        // record stale fragment in merge object, will be vacuumed in background
-        rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
-        if (rc < 0) {
-          return rc;
-        }
-        continue;
-      }
+//      if(!entry.meta.merge_obj_name.empty()){
+//        CLS_LOG(10, "WARNING: %s: inlined entry %s head data already merged to %s:%d, data in %s:%d is redundant",
+//                __func__, entry.key.name.c_str(),
+//                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op.merge_obj_name.c_str(), op_entry.offset);
+//        // record stale fragment in merge object, will be vacuumed in background
+//        rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
+//        if (rc < 0) {
+//          return rc;
+//        }
+//        continue;
+//      }
 
       string entry_key;
-      encode_obj_index_key(op_entry.key, &entry_key);
+      encode_obj_index_key(entry.key, &entry_key);
       if (entry.exists){
         // inlined entry is still what we detached
         // tiny object payload data position
-        entry.meta.merge_obj_name = op.merge_obj_name;
-        entry.meta.offset = op_entry.offset;
+//        entry.meta.merge_obj_name = op.merge_obj_name;
+//        entry.meta.offset = op_entry.offset;
         entry.may_have_stale_head = false;
 
         bufferlist entry_bl;
@@ -2065,15 +1989,14 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
         }
       }
 
-    } else {
-      CLS_LOG(10, "WARNING: %s: inlined entry %s was overwritten by other tiny obj ", __func__, entry.key.name.c_str());
-      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
-      if (rc < 0) {
-        return rc;
-      }
-    }
+//    } else {
+//      CLS_LOG(10, "WARNING: %s: inlined entry %s was overwritten by other tiny obj ", __func__, entry.key.name.c_str());
+//      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
+//      if (rc < 0) {
+//        return rc;
+//      }
+//    }
   }
-  CLS_LOG(10, "INFO: %s read %ld key time taken %ld ns", __func__, op.entries.size(), read_key_time_taken);
 
   if(header.merge_obj_stats.merge_obj_exists(op.sc, op.merge_obj_name) &&
     header.merge_obj_stats.merge_obj_get(op.sc, op.merge_obj_name).size >= op.merged_obj_size){

@@ -359,8 +359,8 @@ void cls_rgw_bucket_list_op(librados::ObjectReadOperation& op,
 }
 
 void cls_rgw_bucket_inlined_entry_list_op(librados::ObjectReadOperation& op,
-                            bool first_list, uint32_t start_offset, string &rgw_instance, int hold_interval,
-                            rgw_cls_inlined_entry_list_op_ret* result)
+                                           bool first_list, uint32_t start_offset, string &rgw_instance, int hold_interval,
+                                           rgw_cls_inlined_entry_list_op_ret* result)
 {
   bufferlist in;
   rgw_cls_inlined_entry_list_op call;
@@ -385,13 +385,13 @@ void cls_rgw_bucket_shard_acquire_lease(librados::ObjectWriteOperation& op,strin
   op.exec(RGW_CLASS, RGW_BUCKET_SHARD_ACQUIRE_LEASE, in);
 }
 
-void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_inlined_entry> &entries,
+void cls_rgw_bucket_clear_inlined_entry_data_op(librados::ObjectWriteOperation& op, list<rgw_bucket_dir_entry> &entries,
                                                 const string &sc, string &merge_obj_name, uint32_t merged_obj_size,
                                                 uint32_t start_offset, uint32_t next_offset, uint32_t rgw_merge_object_max_size_mb)
 {
   rgw_cls_clear_inlined_data_op call;
   call.sc = sc;
-  call.entries = entries;
+  call.entries2 = entries;
   call.merge_obj_name = merge_obj_name;
   call.merged_obj_size = merged_obj_size;
   call.start_offset = start_offset;

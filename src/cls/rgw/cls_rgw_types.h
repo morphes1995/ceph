@@ -558,6 +558,7 @@ struct rgw_bucket_dir_entry {
 };
 WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 
+constexpr unsigned int SHARD_QUEUE_ENTRY_START = 0xABCD;
 struct rgw_bucket_inlined_entry_meta {
     cls_rgw_obj_key key;
     std::string tag;
