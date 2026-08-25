@@ -34,6 +34,7 @@
 #include "services/svc_rados.h"
 #include "services/svc_bi_rados.h"
 #include "common/WorkQueue.h"
+#include "common/async/completion.h"
 
 class RGWWatcher;
 class ACLOwner;
@@ -828,45 +829,44 @@ private:
     }
 };
 
-class RGWPutRequest
-{
-public:
-    rgw_bucket bucket;
-    int shard_id;
-    RGWSI_RADOS::Obj bucket_obj;
-    rgw_cls_obj_complete_op op;
-    ceph::mutex lock = ceph::make_mutex("RGWPutRequest::lock");
-    ceph::condition_variable cond;
-
-    std::list<RGWPutRequest*> *batch_reqs{nullptr};
-
-    int ret_code{0};
-
-    RGWPutRequest(){}
-    RGWPutRequest(rgw_bucket &_bucket, int _shard_id, RGWSI_RADOS::Obj &_bucket_obj, rgw_cls_obj_complete_op &_op)
-                 : bucket(_bucket), shard_id(_shard_id), bucket_obj(_bucket_obj), op(_op){}
-
-    void wait_completion(){
-      std::unique_lock locker{lock};
-      cond.wait(locker);
-    }
-
-    void notify_req_done(){
-      std::unique_lock locker{lock};
-      cond.notify_one();
-    }
-
-    ~RGWPutRequest(){
-      if(batch_reqs){
-        delete batch_reqs;
-      }
-    }
-};
-
 class RGWPutOpCache {
+public:
+    using Signature = void(boost::system::error_code);
+    using Completion = ceph::async::Completion<Signature, void>;
+    using RequestRef = std::unique_ptr<Completion>;
+
+    class RGWPutRequest
+    {
+        friend RGWPutOpCache;
+    public:
+        using Signature = void(boost::system::error_code);
+        using Completion = ceph::async::Completion<Signature, void>;
+
+        rgw_bucket bucket;
+        int shard_id;
+        RGWSI_RADOS::Obj bucket_obj;
+        rgw_cls_obj_complete_op op;
+
+        std::list<RGWPutRequest*> *batch_reqs{nullptr};
+
+        std::unique_ptr<Completion> completion;
+
+        int ret_code{0};
+
+        RGWPutRequest(){}
+        RGWPutRequest(rgw_bucket &_bucket, int _shard_id, RGWSI_RADOS::Obj &_bucket_obj, rgw_cls_obj_complete_op &_op, RequestRef&& request)
+                : bucket(_bucket), shard_id(_shard_id), bucket_obj(_bucket_obj), op(_op), completion{std::move(request)}{}
+
+        ~RGWPutRequest(){
+          if(batch_reqs){
+            delete batch_reqs;
+          }
+        }
+    };
+
+private:
     unordered_map<string, deque<RGWPutRequest*>> put_req_queue;
-    unordered_map<string, deque<RGWPutRequest*>>::iterator curr_shard;
-    //deque<RGWPutRequest*> put_req_queue;
+    typename unordered_map<string, deque<RGWPutRequest*>>::iterator curr_shard;
 protected:
     CephContext *cct;
     rgw::sal::RGWRadosStore* store;
@@ -876,7 +876,7 @@ protected:
 
     struct PutWQ : public DoutPrefixProvider, public ThreadPool::WorkQueue<RGWPutRequest> {
         RGWPutOpCache* op_cache;
-        unordered_map<string, deque<RGWPutRequest*>>::iterator curr_shard;
+        typename unordered_map<string, deque<RGWPutRequest*>>::iterator curr_shard;
         PutWQ(RGWPutOpCache* c, ceph::timespan timeout, ceph::timespan suicide_timeout,
               ThreadPool* tp)
                 : ThreadPool::WorkQueue<RGWPutRequest>("PutWQ", timeout, suicide_timeout,
@@ -928,13 +928,13 @@ protected:
           }
 
           done:
-            ldout(op_cache->cct, 10) << "batch dequeued requests, shard: " << curr_shard->first << " cnt: " << cnt << " size: " << size
-                                     << " req cnt in shard queue: " << shard_queue.size() << dendl;
-            curr_shard++;
-            if(curr_shard == op_cache->put_req_queue.end()){
-              curr_shard = op_cache->put_req_queue.begin();
-            }
-            return batch_req;
+          ldout(op_cache->cct, 10) << "batch dequeued requests, shard: " << curr_shard->first << " cnt: " << cnt << " size: " << size
+                                   << " req cnt in shard queue: " << shard_queue.size() << dendl;
+          curr_shard++;
+          if(curr_shard == op_cache->put_req_queue.end()){
+            curr_shard = op_cache->put_req_queue.begin();
+          }
+          return batch_req;
         }
 
         void _process(RGWPutRequest *req, ThreadPool::TPHandle &) override{
@@ -968,11 +968,20 @@ public:
                      ceph::make_timespan(g_conf()->rgw_op_thread_suicide_timeout),
                      &m_tp) {}
 
-    void enqueue_req(RGWPutRequest* req) {
-      lsubdout(g_ceph_context, rgw, 10)
-          << __func__ << " enqueue request req="
-          << hex << req << dec << dendl;
-      req_wq.queue(req);
+    template <typename ExecutionContext, typename CompletionToken>
+    void enqueue_req(rgw_bucket &bucket, int shard_id, RGWSI_RADOS::Obj &bucket_obj, rgw_cls_obj_complete_op &call,
+                     ExecutionContext &context, CompletionToken&& token, int* ret) {
+      boost::asio::async_completion<CompletionToken, Signature> init(token);
+      auto& handler = init.completion_handler;
+
+      // allocate the Request and add it to the queue
+      auto completion = Completion::create(context.get_executor(), std::move(handler));
+      RGWPutRequest req(bucket, shard_id, bucket_obj, call, std::move(completion));
+      req_wq.queue(&req);
+
+      init.result.get();// wait for completion
+
+      *ret =req.ret_code;
     }
 
     void handle_request(const DoutPrefixProvider *dpp, RGWPutRequest *req);
@@ -1702,7 +1711,7 @@ public:
                    const string& etag, const string& content_type,
                    const string& storage_class,
                    bufferlist *acl_bl, RGWObjCategory category,
-                   list<rgw_obj_index_key> *remove_objs, const string *user_data = nullptr, bool appendable = false);
+                   list<rgw_obj_index_key> *remove_objs, optional_yield y, const string *user_data = nullptr, bool appendable = false);
         int complete_atomic_del(const DoutPrefixProvider *dpp,
                                 real_time& removed_mtime,
                                 list<rgw_obj_index_key> *remove_objs);
@@ -2140,7 +2149,7 @@ public:
                           rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);
   int cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, bool batch_write, BucketShard& bs, const rgw_obj& obj, string& tag,
                                      rgw_bucket_dir_entry& ent, RGWObjCategory category,
-                                     list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *_zones_trace = nullptr);
+                                     list<rgw_obj_index_key> *remove_objs, optional_yield y, uint16_t bilog_flags, rgw_zone_set *_zones_trace = nullptr);
   int cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag, int64_t pool, uint64_t epoch, rgw_bucket_dir_entry& ent,
                            RGWObjCategory category, list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                            rgw_zone_set *zones_trace = nullptr, bool update_quota_stats = true, bool avoid_log_op = false);

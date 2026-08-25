@@ -3528,7 +3528,7 @@ int RGWRados::Object::Write::write_meta_tiny_obj(const DoutPrefixProvider *dpp, 
     int r = index_op.complete_atomic_add(dpp, size, accounted_size,
                            meta.set_mtime, etag, content_type,
                            storage_class, &acl_bl,
-                           meta.category, meta.remove_objs, meta.user_data, meta.appendable);
+                           meta.category, meta.remove_objs, y, meta.user_data, meta.appendable);
     auto after_complete_atomic = ceph_clock_now();
     ldpp_dout(dpp, 20) << "complete atomic time taken: "<< (after_complete_atomic - before_complete_atomic) << dendl;
     if (r < 0)
@@ -8611,7 +8611,8 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_add(const DoutPrefixPro
                                                          const string& etag, const string& content_type,
                                                          const string& storage_class,
                                                          bufferlist *acl_bl, RGWObjCategory category,
-                                                         list<rgw_obj_index_key> *remove_objs, const string *user_data, bool appendable)
+                                                         list<rgw_obj_index_key> *remove_objs, optional_yield y,
+                                                         const string *user_data, bool appendable)
 {
   RGWRados *store = target->get_store();
   BucketShard *bs;
@@ -8653,7 +8654,7 @@ int RGWRados::Bucket::UpdateIndexAtomic::complete_atomic_add(const DoutPrefixPro
   ret = guard_reshard(dpp, nullptr, [&](BucketShard *bs) -> int {
             return store->cls_obj_complete_add_op_atomic(dpp, store->cct->_conf->rgw_enable_tiny_obj_batch_write, *bs, obj, optag,
                                                          ent, category,
-                                                         remove_objs, bilog_flags, zones_trace);
+                                                         remove_objs, y, bilog_flags, zones_trace);
         });
   int r = store->svc.datalog_rados->add_entry(dpp, target->bucket_info, bs->shard_id);
   if (r < 0) {
@@ -11084,7 +11085,7 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
 
 int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, bool batch_write, BucketShard& bs, const rgw_obj& obj, string& tag,
                                                  rgw_bucket_dir_entry& ent, RGWObjCategory category,
-                                                 list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags, rgw_zone_set *_zones_trace)
+                                                 list<rgw_obj_index_key> *remove_objs, optional_yield y, uint16_t bilog_flags, rgw_zone_set *_zones_trace)
 {
   ObjectWriteOperation o;
   o.assert_exists(); // bucket index shard must exist
@@ -11121,11 +11122,14 @@ int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, bool
   call.update_quota_stats = true;
 
   if(batch_write){
-    RGWPutRequest req(bs.bucket, bs.shard_id, bs.bucket_obj, call);
-    get_op_cache()->enqueue_req(&req);
-    req.wait_completion();
+    ceph_assert(y);
+    auto& context = y.get_io_context();
+    auto &yield = y.get_yield_context();
+    boost::system::error_code ec;
 
-    return req.ret_code;
+    int ret =0;
+    get_op_cache()->enqueue_req(bs.bucket, bs.shard_id, bs.bucket_obj, call, context, yield[ec], &ret);
+    return ret;
   }
 
   encode(call, in);
@@ -11156,7 +11160,8 @@ void RGWPutOpCache::handle_request(const DoutPrefixProvider *dpp, RGWPutRequest 
 
   for (auto r: *(batch_req->batch_reqs)) {
     r->ret_code = ret;
-    r->notify_req_done();
+    auto c = r->completion.release();
+    Completion::post(std::unique_ptr<Completion>{c}, boost::system::error_code{});
   }
 
   delete batch_req;
