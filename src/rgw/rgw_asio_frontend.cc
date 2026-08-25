@@ -382,6 +382,10 @@ class ConnectionList {
     }
     connections.clear();
   }
+
+  size_t size(){
+    return connections.size();
+  }
 };
 
 namespace dmc = rgw::dmclock;
@@ -1021,6 +1025,7 @@ void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
         auto conn = boost::intrusive_ptr{new Connection(std::move(s))};
         auto c = connections.add(*conn);
         auto timeout = timeout_timer{context.get_executor(), request_timeout, conn};
+        ldout(env.store->ctx(), 10) << "frontend :current conn num: " << connections.size() << dendl;
         boost::system::error_code ec;
         handle_connection(context, env, conn->socket, timeout, conn->buffer,
                           false, pause_mutex, scheduler.get(), ec, yield);
