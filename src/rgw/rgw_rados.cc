@@ -6455,8 +6455,7 @@ static void accumulate_raw_stats(const rgw_bucket_dir_header& header,
     s.size_utilized += header_stats.actual_size;
     s.num_objects += header_stats.num_entries;
 
-//    s.inlined_entry_num += header_stats.inlined_entry_num;
-//    s.inlined_total_entry_size += header_stats.inlined_total_entry_size;
+    s.inlined_entry_num += header.inlined_obj_epoch.size();
     s.inlined_total_entry_size += (header.queue_tail - header.queue_head);
   }
 }

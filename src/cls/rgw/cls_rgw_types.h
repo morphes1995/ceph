@@ -560,43 +560,23 @@ WRITE_CLASS_ENCODER(rgw_bucket_dir_entry)
 
 constexpr unsigned int SHARD_QUEUE_ENTRY_START = 0xABCD;
 struct rgw_bucket_inlined_entry_meta {
-    cls_rgw_obj_key key;
-    std::string tag;
-    ceph::real_time mtime;
     uint64_t inline_index_epoch{0};
-    uint32_t size{0};
-    string sc;
     bool delete_marker{false};
-    bool may_have_stale_head{false};
 
     rgw_bucket_inlined_entry_meta(){}
-    rgw_bucket_inlined_entry_meta(cls_rgw_obj_key _key, std::string _tag, ceph::real_time _mtime,
-                                  uint64_t _inline_index_epoch, uint32_t _size, string _sc, bool _delete_marker, bool _may_have_stale_head)
-                                  :key(_key), tag(_tag), mtime(_mtime), inline_index_epoch(_inline_index_epoch), size(_size),
-                                  sc(_sc), delete_marker(_delete_marker), may_have_stale_head(_may_have_stale_head){}
+    rgw_bucket_inlined_entry_meta(uint64_t _inline_index_epoch, bool _delete_marker)
+                                  :inline_index_epoch(_inline_index_epoch), delete_marker(_delete_marker){}
 
     void encode(ceph::buffer::list &bl) const {
       ENCODE_START(1, 1, bl);
-        encode(key, bl);
-        encode(tag, bl);
-        encode(mtime, bl);
         encode(inline_index_epoch, bl);
-        encode(size, bl);
-        encode(sc, bl);
         encode(delete_marker, bl);
-        encode(may_have_stale_head, bl);
       ENCODE_FINISH(bl);
     }
     void decode(ceph::buffer::list::const_iterator &bl) {
       DECODE_START_LEGACY_COMPAT_LEN(1, 1, 1, bl);
-        decode(key, bl);
-        decode(tag, bl);
-        decode(mtime, bl);
         decode(inline_index_epoch, bl);
-        decode(size, bl);
-        decode(sc, bl);
         decode(delete_marker, bl);
-        decode(may_have_stale_head, bl);
       DECODE_FINISH(bl);
     }
 
@@ -1181,6 +1161,7 @@ struct rgw_bucket_dir_header {
 
   uint32_t queue_head{0};
   uint32_t queue_tail{0};
+  std::map<string , rgw_bucket_inlined_entry_meta> inlined_obj_epoch;
 
   rgw_bucket_dir_header() : tag_timeout(0), ver(0), master_ver(0), syncstopped(false){}
 
@@ -1200,6 +1181,7 @@ struct rgw_bucket_dir_header {
 
     encode(queue_head, bl);
     encode(queue_tail, bl);
+    encode(inlined_obj_epoch, bl);
     ENCODE_FINISH(bl);
   }
   void decode(ceph::buffer::list::const_iterator &bl) {
@@ -1237,6 +1219,7 @@ struct rgw_bucket_dir_header {
     if (struct_v >= 9){
       decode(queue_head, bl);
       decode(queue_tail, bl);
+      decode(inlined_obj_epoch, bl);
     }
     DECODE_FINISH(bl);
   }

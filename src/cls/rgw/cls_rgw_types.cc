@@ -247,12 +247,7 @@ void rgw_bucket_dir_entry::decode_json(JSONObj *obj) {
 
 void rgw_bucket_inlined_entry_meta::dump(Formatter *f) const
 {
-  encode_json("name", key.name, f);
-  encode_json("instance", key.instance , f);
-  encode_json("tag", tag , f);
-  encode_json("mtime", mtime , f);
   encode_json("inline_index_epoch", inline_index_epoch , f);
-  encode_json("size", size , f);
   encode_json("delete_marker", delete_marker , f);
 }
 

@@ -1483,6 +1483,8 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       return rc;
     }
 
+    header.inlined_obj_epoch[entry.key.name] = rgw_bucket_inlined_entry_meta(entry.meta.inline_index_epoch, false);
+
   }// CLS_RGW_OP_ADD
   else if (op.op == CLS_RGW_OP_DEL){
     if (!entry.exists){
@@ -1542,14 +1544,7 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
       if (rc < 0) {
         return rc;
       }
-      // todo
-      uint16_t entry_start = SHARD_QUEUE_ENTRY_START;
-      encode(entry_start, queue_data);
-
-      bufferlist  entry_meta_bl;
-      rgw_bucket_inlined_entry_meta entry_meta(entry.key, entry.tag, entry.meta.mtime,
-                                               entry.meta.inline_index_epoch, entry.meta.size, old_sc, true, entry.may_have_stale_head);
-      encode(entry_meta, queue_data);
+      //todo
     }
   } // CLS_RGW_OP_DEL
 
@@ -1928,38 +1923,36 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
      * 4. entry is still what we are detaching
      */
 
-//    if (rc == -ENOENT || !entry.meta.inline_head){
-//      CLS_LOG(10, "WARNING: %s: entry %s didn't exist or not inlined ", __func__, op_entry.key.to_string().c_str());
-//      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
-//      if (rc < 0) {
-//        return rc;
-//      }
-//      continue;
-//    }
+    auto it = header.inlined_obj_epoch.find(entry.key.name);
+    if(it == header.inlined_obj_epoch.end()){
+      CLS_LOG(10, "WARNING: %s: entry %s didn't exist or not inlined ", __func__, entry.key.to_string().c_str());
+      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, entry.meta.offset, entry.meta.size);
+      if (rc < 0) {
+        return rc;
+      }
+      continue;
+    }
 
-//    if(entry.meta.inline_index_epoch == op_entry.inline_index_epoch
-//       && entry.tag == op_entry.tag)
-//    {
+    if(it->second.inline_index_epoch == entry.meta.inline_index_epoch)
+    {
+      if(!entry.meta.merge_obj_name.empty()){
+        CLS_LOG(10, "WARNING: %s: inlined entry %s head data already merged to %s:%d, data in %s:%d is redundant",
+                __func__, entry.key.name.c_str(),
+                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op.merge_obj_name.c_str(), entry.meta.offset);
+        // record stale fragment in merge object, will be vacuumed in background
+        rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, entry.meta.offset, entry.meta.size);
+        if (rc < 0) {
+          return rc;
+        }
 
-//      if(!entry.meta.merge_obj_name.empty()){
-//        CLS_LOG(10, "WARNING: %s: inlined entry %s head data already merged to %s:%d, data in %s:%d is redundant",
-//                __func__, entry.key.name.c_str(),
-//                entry.meta.merge_obj_name.c_str(), entry.meta.offset, op.merge_obj_name.c_str(), op_entry.offset);
-//        // record stale fragment in merge object, will be vacuumed in background
-//        rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
-//        if (rc < 0) {
-//          return rc;
-//        }
-//        continue;
-//      }
+        header.inlined_obj_epoch.erase(it);
+        continue;
+      }
 
       string entry_key;
       encode_obj_index_key(entry.key, &entry_key);
       if (entry.exists){
         // inlined entry is still what we detached
-        // tiny object payload data position
-//        entry.meta.merge_obj_name = op.merge_obj_name;
-//        entry.meta.offset = op_entry.offset;
         entry.may_have_stale_head = false;
 
         bufferlist entry_bl;
@@ -1989,13 +1982,14 @@ int rgw_bucket_clear_entry_inlined_data_op(cls_method_context_t hctx, bufferlist
         }
       }
 
-//    } else {
-//      CLS_LOG(10, "WARNING: %s: inlined entry %s was overwritten by other tiny obj ", __func__, entry.key.name.c_str());
-//      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, op_entry.offset, op_entry.size);
-//      if (rc < 0) {
-//        return rc;
-//      }
-//    }
+      header.inlined_obj_epoch.erase(it);
+    } else {
+      CLS_LOG(10, "WARNING: %s: inlined entry %s was overwritten by other tiny obj ", __func__, entry.key.name.c_str());
+      rc = add_stale_frag(hctx, &header, op.sc, op.merge_obj_name, entry.meta.offset, entry.meta.size);
+      if (rc < 0) {
+        return rc;
+      }
+    }
   }
 
   if(header.merge_obj_stats.merge_obj_exists(op.sc, op.merge_obj_name) &&
