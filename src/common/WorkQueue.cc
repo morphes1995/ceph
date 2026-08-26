@@ -15,6 +15,7 @@
 #include "WorkQueue.h"
 #include "include/compat.h"
 #include "common/errno.h"
+#include <boost/algorithm/string.hpp>
 
 #define dout_subsys ceph_subsys_tp
 #undef dout_prefix
@@ -36,6 +37,17 @@ ThreadPool::ThreadPool(CephContext *cct_, std::string nm, std::string tn, int n,
     _conf_keys = new const char*[2];
     _conf_keys[0] = _thread_num_option.c_str();
     _conf_keys[1] = NULL;
+
+    std::vector<string> options;
+    boost::split(options, string(_thread_num_option.c_str()), boost::is_any_of(","));
+    for (auto &option: options){
+      std::vector<string> name_val;
+      boost::split(name_val, option, boost::is_any_of("="));
+      if(name_val[0] == "max_wait_ms"){
+        max_wait_ms = atoi(name_val[1].c_str());
+      }
+    }
+
   } else {
     _conf_keys = new const char*[1];
     _conf_keys[0] = NULL;
@@ -137,9 +149,14 @@ void ThreadPool::worker(WorkThread *wt)
       hb,
       ceph::make_timespan(cct->_conf->threadpool_default_timeout),
       ceph::make_timespan(0));
-    auto wait = std::chrono::seconds(
-      cct->_conf->threadpool_empty_queue_max_wait);
-    _cond.wait_for(ul, wait);
+    if(max_wait_ms > 0){
+      auto wait = std::chrono::microseconds(max_wait_ms);
+      _cond.wait_for(ul, wait);
+    }else{
+      auto wait = std::chrono::seconds(
+              cct->_conf->threadpool_empty_queue_max_wait);
+      _cond.wait_for(ul, wait);
+    }
   }
   ldout(cct,1) << "worker finish" << dendl;
 

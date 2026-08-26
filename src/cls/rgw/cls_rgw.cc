@@ -1403,12 +1403,14 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   return write_bucket_header(hctx, &header);
 } // rgw_bucket_complete_op
 
-static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucket_dir_header &header, rgw_cls_obj_complete_op &op, bufferlist &queue_data){
+static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucket_dir_header &header, rgw_cls_obj_complete_op &op, bufferlist &queue_data,
+                                            uint64_t *read_entries_time_taken){
   rgw_bucket_dir_entry entry;
   std::string idx;
   uint64_t before_read_entry = ceph_clock_now().to_nsec();
   int rc = read_key_entry(hctx, op.key, &idx, &entry);
-  CLS_LOG(10, "INFO: %s read entry %s time taken %ld ns", __func__, op.key.name.c_str(), ceph_clock_now().to_nsec()- before_read_entry);
+  (*read_entries_time_taken) += ceph_clock_now().to_nsec()- before_read_entry;
+  CLS_LOG(20, "INFO: %s read entry %s time taken %ld ns", __func__, op.key.name.c_str(), ceph_clock_now().to_nsec()- before_read_entry);
   if (rc < 0 && rc != -ENOENT) {
     return rc;
   }
@@ -1608,7 +1610,8 @@ int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, buf
 
 
   bufferlist queue_data;
-  int ret = do_rgw_bucket_complete_atomic_op(hctx, header, op, queue_data);
+  uint64_t read_entries_time_taken = 0;
+  int ret = do_rgw_bucket_complete_atomic_op(hctx, header, op, queue_data, &read_entries_time_taken);
   if(ret < 0){
     return ret;
   }
@@ -1640,21 +1643,27 @@ int rgw_bucket_complete_atomic_op_batch(cls_method_context_t hctx, bufferlist *i
   CLS_LOG(10, "rgw_bucket_complete_atomic_op_batch(): handle %ld ops", op.ops.size());
 
   rgw_bucket_dir_header header;
+  uint64_t before_read_header = ceph_clock_now().to_nsec();
   int rc = read_bucket_header(hctx, &header);
+  CLS_LOG(10, "INFO: %s read header time taken %ld ns", __func__, ceph_clock_now().to_nsec()- before_read_header);
   if (rc < 0) {
     CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op_batch(): failed to read header\n");
     return -EINVAL;
   }
 
+  uint64_t read_entries_time_taken = 0;
   bufferlist queue_data;
   for (auto &op: op.ops){
-    rc = do_rgw_bucket_complete_atomic_op(hctx, header, op, queue_data);
+    rc = do_rgw_bucket_complete_atomic_op(hctx, header, op, queue_data, &read_entries_time_taken);
     if(rc < 0){
       return rc;
     }
   }
+  CLS_LOG(10, "INFO: rgw_bucket_complete_atomic_op_batch(): read %d entries, time taken: %ld ms \n", op.ops.size(), read_entries_time_taken/1000000);
+  int padding_len = 4096 - (queue_data.length() % 4096);
+  queue_data.append_zero(padding_len);
 
-  CLS_LOG(10, "INFO: rgw_bucket_complete_atomic_op_batch(): write %d bytes to shard obj data \n", queue_data.length());
+  CLS_LOG(10, "INFO: rgw_bucket_complete_atomic_op_batch(): write %d bytes to shard obj data, padding: %d \n", queue_data.length(), padding_len);
   //write data size and data at tail offset
   auto ret = cls_cxx_write2(hctx, header.queue_tail, queue_data.length(), &queue_data, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
   if (ret < 0) {

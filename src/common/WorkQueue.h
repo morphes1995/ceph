@@ -103,6 +103,7 @@ protected:
   unsigned _num_threads;
   std::string _thread_num_option;
   const char **_conf_keys;
+  int max_wait_ms{0};
 
   const char **get_tracked_conf_keys() const override {
     return _conf_keys;

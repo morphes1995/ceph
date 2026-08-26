@@ -46,7 +46,7 @@ function(build_rocksdb)
 
   list(APPEND rocksdb_CMAKE_ARGS -DPORTABLE=ON)
   list(APPEND rocksdb_CMAKE_ARGS -DCMAKE_AR=${CMAKE_AR})
-  list(APPEND rocksdb_CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
+  list(APPEND rocksdb_CMAKE_ARGS -DCMAKE_BUILD_TYPE=RelWithDebInfo)
   list(APPEND rocksdb_CMAKE_ARGS -DFAIL_ON_WARNINGS=OFF)
   list(APPEND rocksdb_CMAKE_ARGS -DUSE_RTTI=1)
   list(APPEND rocksdb_CMAKE_ARGS -G${CMAKE_GENERATOR})

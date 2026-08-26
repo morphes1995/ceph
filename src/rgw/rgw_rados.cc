@@ -11132,7 +11132,11 @@ int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, bool
     boost::system::error_code ec;
 
     int ret =0;
+    auto before_op = ceph_clock_now();
+    ldpp_dout(dpp, 20) << " put op enqueue, shard:" << bs.shard_id << " key:"<< call.key.name << dendl;
     get_op_cache()->enqueue_req(bs.bucket, bs.shard_id, bs.bucket_obj, call, context, yield[ec], &ret);
+    auto after_op = ceph_clock_now();
+    ldpp_dout(dpp, 20) << " put op committed to osd ,shard: " << bs.shard_id << " key:"<< call.key.name <<"time taken: "<< (after_op - before_op) << dendl;
     return ret;
   }
 
@@ -11143,35 +11147,48 @@ int RGWRados::cls_obj_complete_add_op_atomic(const DoutPrefixProvider *dpp, bool
 }
 
 void RGWPutOpCache::handle_request(const DoutPrefixProvider *dpp, RGWPutRequest *batch_req) {
-  auto before_batch_op = ceph_clock_now();
-  ObjectWriteOperation o;
-  o.assert_exists(); // bucket index shard must exist
-  rgw_cls_obj_complete_op_batch op_batch;
-  bufferlist in;
-  int total_size = 0;
-  for (auto r: *(batch_req->batch_reqs)) {
-    ldpp_dout(dpp, 10) << "deal with req , shard: " << r->shard_id << "key: " << r->op.key.name << dendl;
-    op_batch.ops.push_back(r->op);
-    total_size += r->op.meta.size;
-  }
 
-  encode(op_batch, in);
-  o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, in);
-  int ret = batch_req->bucket_obj.operate(dpp, &o,null_yield);
-  if(ret<0){
-    ldpp_dout(dpp, 1) << __func__ << " ERROR when submit batch ops, r:" << ret << dendl;
-  }
+  for (auto &shard_ops: *(batch_req->batch_reqs)){
+    ObjectWriteOperation o;
+    o.assert_exists(); // bucket index shard must exist
+    rgw_cls_obj_complete_op_batch op_batch;
+    bufferlist in;
+    int total_size = 0;
 
-  for (auto r: *(batch_req->batch_reqs)) {
-    r->ret_code = ret;
-    auto c = r->completion.release();
-    Completion::post(std::unique_ptr<Completion>{c}, boost::system::error_code{});
+    RGWSI_RADOS::Obj bucket_obj;
+    int shard_id =-1;
+    for (auto r: shard_ops.second) {
+      ldpp_dout(dpp, 10) << "deal with req , shard: " << r->shard_id << "key: " << r->op.key.name << dendl;
+      op_batch.ops.push_back(std::move(r->op));
+      total_size += r->op.meta.size;
+      if(shard_id == -1){
+        shard_id = r->shard_id;
+        bucket_obj = r->bucket_obj;
+      }else{
+        ceph_assert(shard_id == r->shard_id);
+      }
+    }
+
+    encode(op_batch, in);
+    o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, in);
+    ldpp_dout(dpp, 20) << op_batch.ops.size() << " put ops batch committing to osd, size: " << total_size <<" shard: " << shard_id << dendl;
+
+    batch_ops_flush_data *entry = new batch_ops_flush_data(dpp, shard_ops.second, ceph_clock_now().to_msec());
+    AioCompletion *acmp = librados::Rados::aio_create_completion(entry, batch_ops_flush_cb);
+    int ret = bucket_obj.aio_operate(acmp, &o);
+    if(ret<0){
+      ldpp_dout(dpp, 1) << __func__ << " ERROR when submit async batch ops, shard:" << shard_ops.first << ", r:" << ret << dendl;
+      for (auto r: shard_ops.second) {
+        r->ret_code = ret;
+        auto c = r->completion.release();
+        Completion::post(std::unique_ptr<Completion>{c}, boost::system::error_code{});
+      }
+      delete entry;
+    }
+
   }
 
   delete batch_req;
-
-  auto after_batch_op = ceph_clock_now();
-  ldpp_dout(dpp, 20) << op_batch.ops.size() << " put ops batch committed to osd, size: " << total_size << " time taken: "<< (after_batch_op - before_batch_op) << dendl;
 }
 
 int RGWRados::cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag,

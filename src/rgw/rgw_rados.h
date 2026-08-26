@@ -847,7 +847,7 @@ public:
         RGWSI_RADOS::Obj bucket_obj;
         rgw_cls_obj_complete_op op;
 
-        std::list<RGWPutRequest*> *batch_reqs{nullptr};
+        unordered_map<string, std::list<RGWPutRequest*>> *batch_reqs{nullptr};
 
         std::unique_ptr<Completion> completion;
 
@@ -865,8 +865,9 @@ public:
     };
 
 private:
-    unordered_map<string, deque<RGWPutRequest*>> put_req_queue;
-    typename unordered_map<string, deque<RGWPutRequest*>>::iterator curr_shard;
+    unordered_map<string, deque<RGWPutRequest*>> put_req_queue; // bucket shard -> pending ops
+    unordered_map<string, uint64_t> shards_stat; // shard -> last batch commit time mliseconds
+
 protected:
     CephContext *cct;
     rgw::sal::RGWRadosStore* store;
@@ -876,7 +877,6 @@ protected:
 
     struct PutWQ : public DoutPrefixProvider, public ThreadPool::WorkQueue<RGWPutRequest> {
         RGWPutOpCache* op_cache;
-        typename unordered_map<string, deque<RGWPutRequest*>>::iterator curr_shard;
         PutWQ(RGWPutOpCache* c, ceph::timespan timeout, ceph::timespan suicide_timeout,
               ThreadPool* tp)
                 : ThreadPool::WorkQueue<RGWPutRequest>("PutWQ", timeout, suicide_timeout,
@@ -885,10 +885,9 @@ protected:
         bool _enqueue(RGWPutRequest* req) override{
           string shard_id = string_join_reserve(':', req->bucket.tenant, req->bucket.name, req->bucket.marker,
                                                 to_string(req->shard_id));
-          bool shard_none_exist = op_cache->put_req_queue.find(shard_id) ==  op_cache->put_req_queue.end();
           op_cache->put_req_queue[shard_id].push_back(req);
-          if(shard_none_exist){
-            curr_shard = op_cache->put_req_queue.begin();
+          if(op_cache->shards_stat.find(shard_id) == op_cache->shards_stat.end()){
+            op_cache->shards_stat[shard_id] = ceph_clock_now().to_msec();
           }
           ldout(op_cache->cct, 10) << "enqueued request , shard=" << shard_id <<" req=" << hex << req << dec << dendl;
           return true;
@@ -902,37 +901,37 @@ protected:
           if(op_cache->put_req_queue.empty()){
             return NULL;
           }
-
-          auto &shard_queue = curr_shard->second;
-          RGWPutRequest *batch_req = NULL;
-          int cnt = 0;
-          int size = 0;
-          if (shard_queue.size() == 0){
-            goto done;
-          }
-
-          batch_req = new RGWPutRequest();
-          batch_req->batch_reqs = new std::list<RGWPutRequest*>();
-
-          while(!shard_queue.empty() && cnt < op_cache->cct->_conf->rgw_tiny_obj_write_op_max_batch_cnt){
-            RGWPutRequest *r = shard_queue.front();
-            if(cnt == 0){
-              batch_req->bucket = r->bucket;
-              batch_req->shard_id = r->shard_id;
-              batch_req->bucket_obj = r->bucket_obj;
+          uint64_t curr = ceph_clock_now().to_msec();
+          list<string> least_recently_flush_shards;
+          for (auto &shard_stat: op_cache->shards_stat){
+            if (curr - shard_stat.second > op_cache->cct->_conf->rgw_cache_op_flush_interval_ms){
+              least_recently_flush_shards.push_back(shard_stat.first);
             }
-            batch_req->batch_reqs->push_back(r);
-            shard_queue.pop_front();
-            cnt ++;
-            size += r->op.meta.size;
           }
 
-          done:
-          ldout(op_cache->cct, 10) << "batch dequeued requests, shard: " << curr_shard->first << " cnt: " << cnt << " size: " << size
-                                   << " req cnt in shard queue: " << shard_queue.size() << dendl;
-          curr_shard++;
-          if(curr_shard == op_cache->put_req_queue.end()){
-            curr_shard = op_cache->put_req_queue.begin();
+          RGWPutRequest *batch_req = new RGWPutRequest();
+          batch_req->batch_reqs = new unordered_map<string, std::list<RGWPutRequest*>>();
+          for (const auto &shard_to_flush: least_recently_flush_shards){
+            auto &shard_queue = op_cache->put_req_queue[shard_to_flush];
+            int cnt = 0;
+            int size = 0;
+            list<RGWPutRequest*> ops;
+            while(!shard_queue.empty() && cnt < op_cache->cct->_conf->rgw_tiny_obj_write_op_max_batch_cnt){
+              RGWPutRequest *r = shard_queue.front();
+              ops.push_back(r);
+              shard_queue.pop_front();
+              cnt ++;
+              size += r->op.meta.size;
+            }
+            if(cnt == 0){
+              continue;
+            }
+
+            (*batch_req->batch_reqs)[shard_to_flush] = std::move(ops);
+            op_cache->shards_stat[shard_to_flush] = curr; // update latest flush time
+            ldout(op_cache->cct, 10) << "shard: " << shard_to_flush << " has" << curr - op_cache->shards_stat[shard_to_flush] << " ms not flush, flush now" << dendl;
+            ldout(op_cache->cct, 10) << "batch dequeued requests, shard: " << shard_to_flush << " cnt: " << cnt << " size: " << size
+                                     << " req cnt in shard queue: " << shard_queue.size() << dendl;
           }
           return batch_req;
         }
@@ -962,7 +961,7 @@ protected:
 public:
     RGWPutOpCache(CephContext* const cct, const int num_threads)
             : cct(cct),
-              m_tp(cct, "RGWPutOpCache::m_tp", "tp_rgw_bg_put", num_threads),
+              m_tp(cct, "RGWPutOpCache::m_tp", "tp_rgw_bg_put", num_threads, "max_wait_ms=10"),
               req_wq(this,
                      ceph::make_timespan(g_conf()->rgw_op_thread_timeout),
                      ceph::make_timespan(g_conf()->rgw_op_thread_suicide_timeout),
@@ -982,6 +981,34 @@ public:
       init.result.get();// wait for completion
 
       *ret =req.ret_code;
+    }
+
+    class batch_ops_flush_data {
+        const DoutPrefixProvider *dpp;
+        std::list<RGWPutRequest*> reqs;
+        uint64_t start_time;
+    public:
+        batch_ops_flush_data(const DoutPrefixProvider *_dpp, std::list<RGWPutRequest*> &_reqs, uint64_t _start_time):dpp(_dpp), reqs(_reqs), start_time(_start_time){}
+        void handle_completion(librados::completion_t cb) {
+          int ret = rados_aio_get_return_value(cb);
+          ldpp_dout(dpp, 20) << reqs.size() << " put ops batch committed to osd, shard: " << reqs.front()->shard_id
+                             << " time taken:" << ceph_clock_now().to_msec() - start_time<< "ms"<< dendl;
+          if (ret<0){
+            ldpp_dout(dpp, 1) << "ERROR failed to batch commit ops of shard: "<< reqs.front()->shard_id << ",  r: " << ret << dendl;
+          }
+          for (auto r: reqs) {
+            r->ret_code = ret;
+            auto c = r->completion.release();
+            Completion::post(std::unique_ptr<Completion>{c}, boost::system::error_code{});
+          }
+        }
+    };
+
+    static void batch_ops_flush_cb(librados::completion_t cb, void *arg)
+    {
+      batch_ops_flush_data *completion = (batch_ops_flush_data *)arg;
+      completion->handle_completion(cb);
+      delete completion;
     }
 
     void handle_request(const DoutPrefixProvider *dpp, RGWPutRequest *req);
