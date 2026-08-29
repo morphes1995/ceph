@@ -11170,7 +11170,12 @@ void RGWPutOpCache::handle_request(const DoutPrefixProvider *dpp, RGWPutRequest 
     }
 
     encode(op_batch, in);
-    o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, in);
+    if(cct->_conf->rgw_test_avoid_entry_read){
+      o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH_NO_READ_ENTRY, in);
+    }else{
+      o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, in);
+    }
+
     ldpp_dout(dpp, 20) << op_batch.ops.size() << " put ops batch committing to osd, size: " << total_size <<" shard: " << shard_id << dendl;
 
     batch_ops_flush_data *entry = new batch_ops_flush_data(dpp, shard_ops.second, ceph_clock_now().to_msec());

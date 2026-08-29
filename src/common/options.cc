@@ -6113,6 +6113,9 @@ std::vector<Option> get_rgw_options() {
   Option("rgw_enable_tiny_obj_batch_write", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
           .set_default(false)
           .set_description("rgw tiny object write ops send to osd in batch"),
+  Option("rgw_test_avoid_entry_read", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+          .set_default(false)
+          .set_description("cls method avoid read bi entry when execute"),
   Option("rgw_cache_op_flush_interval_ms", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
           .set_default(10)
           .set_description("shard cache ops flush interval"),

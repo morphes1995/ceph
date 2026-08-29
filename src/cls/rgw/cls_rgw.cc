@@ -1579,6 +1579,110 @@ static int do_rgw_bucket_complete_atomic_op(cls_method_context_t hctx, rgw_bucke
   return 0;
 }
 
+static int do_rgw_bucket_complete_atomic_op2(cls_method_context_t hctx, rgw_bucket_dir_header &header, rgw_cls_obj_complete_op &op, bufferlist &queue_data){
+  rgw_bucket_dir_entry entry;
+  std::string idx;
+  // controls whether remove_objs deletions are logged
+  const bool default_log_op = op.log_op && !header.syncstopped;
+  // controls whether this operation is logged (depends on op.op and ondisk)
+  bool log_op = default_log_op;
+  CLS_LOG(1, "rgw_bucket_complete_atomic_op(): op=%d, entry: name=%s, exists=%d inlined=%d",
+          op.op, entry.key.name.c_str(), entry.exists, entry.meta.inline_head);
+
+  int rc = 0;
+  if (op.op == CLS_RGW_OP_ADD){
+    entry.key = op.key;
+    entry.locator = op.locator;
+    entry.index_ver = header.ver;
+    entry.exists = true;
+    entry.tag = op.tag;
+    entry.meta = op.meta;
+    entry.meta.inline_index_epoch = cls_current_version(hctx);
+
+    bufferlist head_data_bl = std::move(entry.meta.head_data);
+    uint16_t entry_start = SHARD_QUEUE_ENTRY_START;
+    encode(entry_start, queue_data); // 1. encode magic number
+    encode(entry, queue_data);// 2. encode meta part
+
+    int bl_len = queue_data.length();
+    queue_data.claim_append(head_data_bl); // 3. encode data part
+    entry.meta.offset = header.queue_tail + bl_len; // 4. update data part location
+    ceph_assert(entry.meta.head_data.length() == 0);
+
+    CLS_LOG(10, "INFO, %s encode rgw_bucket_inlined_entry_meta, key: %s, shard %d, header queue tail: %d, queue bl len: %d",
+            __func__, entry.key.name.c_str(), cls_current_shard_id(hctx), header.queue_tail, queue_data.length());
+
+    rgw_bucket_dir_entry_meta& meta = op.meta;
+    rgw_bucket_category_stats& stats = header.stats[meta.category];
+    if (op.update_quota_stats){
+      // account for new entry
+      stats.num_entries++;
+      stats.total_size += meta.accounted_size;
+      stats.total_size_rounded += cls_rgw_get_rounded_size(meta.accounted_size);
+      stats.actual_size += meta.size;
+    }
+
+    bufferlist new_key_bl;
+    encode(entry, new_key_bl);
+    rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+    if (rc < 0) {
+      return rc;
+    }
+
+  }// CLS_RGW_OP_ADD
+  else if (op.op == CLS_RGW_OP_DEL){
+    if (!entry.exists){
+      CLS_LOG(20, " %s  del op race failed, entry %s was already deleted!\n",
+              __func__ , entry.key.name.c_str());
+      return -ECANCELED;
+    }
+    if (!entry.meta.inline_head){
+      CLS_LOG(20, " %s  del op race failed, entry %s was already overwritten by big obj !\n",
+              __func__ , entry.key.name.c_str());
+      return -ECANCELED;
+    }
+
+    if (entry.tag != op.tag){
+      CLS_LOG(20, " %s  del op race failed, entry %s was already overwritten by small obj!\n",
+              __func__ , entry.key.name.c_str());
+      return -ECANCELED;
+    }
+
+
+    entry.exists = false;
+    entry.meta = op.meta;
+    entry.meta.inline_index_epoch = cls_current_version(hctx);
+    bufferlist new_key_bl;
+    encode(entry, new_key_bl);
+    rc = cls_cxx_map_set_val(hctx, idx, &new_key_bl);
+    if (rc < 0) {
+      return rc;
+    }
+    // todo
+  } // CLS_RGW_OP_DEL
+
+  if (log_op) {
+    rc = log_index_operation(hctx, op.key, op.op, op.tag, entry.meta.mtime,
+                             entry.ver, CLS_RGW_STATE_COMPLETE, header.ver,
+                             header.max_marker, op.bilog_flags, NULL, NULL,
+                             &op.zones_trace);
+    if (rc < 0) {
+      return rc;
+    }
+  }
+
+  CLS_LOG(20, "rgw_bucket_complete_atomic_op(): remove_objs.size()=%d",
+          (int)op.remove_objs.size());
+  for (const auto& remove_key : op.remove_objs) {
+    rc = complete_remove_obj(hctx, header, remove_key, default_log_op);
+    if (rc < 0) {
+      continue; // part cleanup errors are not fatal
+    }
+  }
+
+  return 0;
+}
+
 int rgw_bucket_complete_atomic_op(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
 {
   CLS_LOG(10, "entered %s", __func__);
@@ -1660,6 +1764,51 @@ int rgw_bucket_complete_atomic_op_batch(cls_method_context_t hctx, bufferlist *i
     }
   }
   CLS_LOG(10, "INFO: rgw_bucket_complete_atomic_op_batch(): read %d entries, time taken: %ld ms \n", op.ops.size(), read_entries_time_taken/1000000);
+  int padding_len = 4096 - (queue_data.length() % 4096);
+  queue_data.append_zero(padding_len);
+
+  CLS_LOG(10, "INFO: rgw_bucket_complete_atomic_op_batch(): write %d bytes to shard obj data, padding: %d \n", queue_data.length(), padding_len);
+  //write data size and data at tail offset
+  auto ret = cls_cxx_write2(hctx, header.queue_tail, queue_data.length(), &queue_data, CEPH_OSD_OP_FLAG_FADVISE_SEQUENTIAL);
+  if (ret < 0) {
+    return ret;
+  }
+  header.queue_tail += queue_data.length();
+
+  return write_bucket_header(hctx, &header);
+}
+
+int rgw_bucket_complete_atomic_op_batch2(cls_method_context_t hctx, bufferlist *in, bufferlist *out)
+{
+  CLS_LOG(10, "entered %s", __func__);
+  // decode request
+  rgw_cls_obj_complete_op_batch op;
+  auto iter = in->cbegin();
+  try {
+    decode(op, iter);
+  } catch (ceph::buffer::error& err) {
+    CLS_LOG(1, "ERROR: %s: failed to decode request\n", __func__);
+    return -EINVAL;
+  }
+
+  CLS_LOG(10, "rgw_bucket_complete_atomic_op_batch(): handle %ld ops", op.ops.size());
+
+  rgw_bucket_dir_header header;
+  uint64_t before_read_header = ceph_clock_now().to_nsec();
+  int rc = read_bucket_header(hctx, &header);
+  CLS_LOG(10, "INFO: %s read header time taken %ld ns", __func__, ceph_clock_now().to_nsec()- before_read_header);
+  if (rc < 0) {
+    CLS_LOG(1, "ERROR: rgw_bucket_complete_atomic_op_batch(): failed to read header\n");
+    return -EINVAL;
+  }
+
+  bufferlist queue_data;
+  for (auto &op: op.ops){
+    rc = do_rgw_bucket_complete_atomic_op2(hctx, header, op, queue_data);
+    if(rc < 0){
+      return rc;
+    }
+  }
   int padding_len = 4096 - (queue_data.length() % 4096);
   queue_data.append_zero(padding_len);
 
@@ -6232,6 +6381,7 @@ CLS_INIT(rgw)
   cls_method_handle_t h_rgw_bucket_complete_op;
   cls_method_handle_t h_rgw_bucket_complete_atomic_op;
   cls_method_handle_t h_rgw_bucket_complete_atomic_op_batch;
+  cls_method_handle_t h_rgw_bucket_complete_atomic_op_batch2;
   cls_method_handle_t h_rgw_bucket_link_olh;
   cls_method_handle_t h_rgw_bucket_unlink_instance_op;
   cls_method_handle_t h_rgw_bucket_read_olh_log;
@@ -6300,6 +6450,7 @@ CLS_INIT(rgw)
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_op, &h_rgw_bucket_complete_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_ATOMIC_OP, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_atomic_op, &h_rgw_bucket_complete_atomic_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_atomic_op_batch, &h_rgw_bucket_complete_atomic_op_batch);
+  cls_register_cxx_method(h_class, RGW_BUCKET_COMPLETE_ATOMIC_OP_BATCH_NO_READ_ENTRY, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_complete_atomic_op_batch2, &h_rgw_bucket_complete_atomic_op_batch2);
   cls_register_cxx_method(h_class, RGW_BUCKET_LINK_OLH, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_link_olh, &h_rgw_bucket_link_olh);
   cls_register_cxx_method(h_class, RGW_BUCKET_UNLINK_INSTANCE, CLS_METHOD_RD | CLS_METHOD_WR, rgw_bucket_unlink_instance, &h_rgw_bucket_unlink_instance_op);
   cls_register_cxx_method(h_class, RGW_BUCKET_READ_OLH_LOG, CLS_METHOD_RD, rgw_bucket_read_olh_log, &h_rgw_bucket_read_olh_log);
